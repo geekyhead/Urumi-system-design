@@ -1,0 +1,59 @@
+# Production profile for a k3s VPS (see scripts/install-vps.sh and the README).
+# Override the domains on the command line:
+#   --set ingress.host=platform.example.com
+#   --set orchestrator.storeBaseDomain=stores.example.com
+#   --set orchestrator.publicIngressAddress=<VPS public IP>
+
+api:
+  image:
+    repository: ghcr.io/geekyhead/urumi-system-design/api
+    tag: latest
+    pullPolicy: Always
+  replicas: 2
+
+dashboard:
+  image:
+    repository: ghcr.io/geekyhead/urumi-system-design/dashboard
+    tag: latest
+    pullPolicy: Always
+  replicas: 2
+
+orchestrator:
+  storeProfile: prod
+  storeBaseDomain: "stores.example.com"
+  storeTls: true
+  storeAliasDomains: []
+  maxStores: 20
+  publicIngressAddress: "203.0.113.10"
+  publicIngressHostname: ""
+
+auth:
+  enabled: true
+  users:
+    - name: admin
+      role: admin
+      maxStores: 20
+    - name: demo
+      role: user
+      maxStores: 2
+
+audit:
+  backend: postgres
+
+postgres:
+  enabled: true
+  storage: 2Gi
+  storageClass: local-path
+
+autoscaling:
+  # k3s ships metrics-server, so the API scales on CPU.
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+
+ingress:
+  host: platform.example.com
+  aliasHosts: []
+  tls: true
+  clusterIssuer: letsencrypt-prod

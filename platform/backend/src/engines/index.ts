@@ -11,6 +11,7 @@ export interface EngineStoreRef {
   name: string;
   namespace: string;
   catalog: ResolvedCatalog;
+  customDomains: string[];
   accentColor: string;
 }
 

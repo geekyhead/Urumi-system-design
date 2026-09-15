@@ -32,7 +32,7 @@ cleanup() {
   [[ "${COMPLETED}" == "true" ]] || { [[ ${code} -ne 0 ]] || code=1; }
   if [[ ${code} -ne 0 && -n "${STORE_ID}" && "${KEEP_STORE}" != "true" ]]; then
     log "Test failed; deleting store ${STORE_ID} so it does not leak"
-    curl -fsS -X DELETE "${API}/stores/${STORE_ID}" >/dev/null 2>&1 || true
+    api -fsS -X DELETE "${API}/stores/${STORE_ID}" >/dev/null 2>&1 || true
   fi
   rm -rf "${WORK_DIR}"
   exit "${code}"
@@ -43,6 +43,16 @@ for bin in curl jq kubectl; do
   command -v "${bin}" >/dev/null 2>&1 || fail "${bin} is required"
 done
 
+# API token: API_TOKEN env, otherwise the first admin token from the platform Secret.
+if [[ -z "${API_TOKEN:-}" ]]; then
+  API_TOKEN="$(kubectl get secret -n "${PLATFORM_NAMESPACE:-store-platform}" store-platform-auth \
+    -o jsonpath='{.data.users\.json}' 2>/dev/null | base64 -d 2>/dev/null \
+    | jq -r '[.[] | select(.role == "admin")][0].token // empty' 2>/dev/null || true)"
+fi
+AUTH_HEADER=()
+[[ -n "${API_TOKEN}" ]] && AUTH_HEADER=(-H "Authorization: Bearer ${API_TOKEN}")
+api() { curl "${AUTH_HEADER[@]}" "$@"; }
+
 # ---------------------------------------------------------------------------
 log "Checking platform health at ${API%/api}/healthz"
 curl -fsS "${API%/api}/healthz" >/dev/null || fail "Platform API not reachable. Run 'make deploy' first."
@@ -52,7 +62,7 @@ IDEMPOTENCY_KEY="e2e-$(date +%s)-${RANDOM}"
 log "Creating store '${STORE_NAME}' (idempotency key ${IDEMPOTENCY_KEY})"
 create_body="$(jq -n --arg name "${STORE_NAME}" --arg key "${IDEMPOTENCY_KEY}" \
   '{name: $name, engine: "woocommerce", idempotencyKey: $key}')"
-create_resp="$(curl -sS -w '\n%{http_code}' -X POST "${API}/stores" \
+create_resp="$(api -sS -w '\n%{http_code}' -X POST "${API}/stores" \
   -H 'Content-Type: application/json' -d "${create_body}")"
 create_code="$(tail -n1 <<<"${create_resp}")"
 create_json="$(sed '$d' <<<"${create_resp}")"
@@ -62,7 +72,7 @@ STORE_ID="$(jq -r '.id' <<<"${create_json}")"
 log "Store id: ${STORE_ID}"
 
 log "Replaying the same request to prove idempotency"
-replay_json="$(curl -fsS -X POST "${API}/stores" -H 'Content-Type: application/json' -d "${create_body}")"
+replay_json="$(api -fsS -X POST "${API}/stores" -H 'Content-Type: application/json' -d "${create_body}")"
 [[ "$(jq -r '.id' <<<"${replay_json}")" == "${STORE_ID}" ]] || fail "Idempotent replay returned a different store: ${replay_json}"
 
 # ---------------------------------------------------------------------------
@@ -70,7 +80,7 @@ log "Waiting up to ${READY_TIMEOUT}s for status Ready"
 deadline=$(( $(date +%s) + READY_TIMEOUT ))
 status=""
 while :; do
-  detail="$(curl -fsS "${API}/stores/${STORE_ID}")" || fail "GET /api/stores/${STORE_ID} failed"
+  detail="$(api -fsS "${API}/stores/${STORE_ID}")" || fail "GET /api/stores/${STORE_ID} failed"
   status="$(jq -r '.status' <<<"${detail}")"
   case "${status}" in
     Ready) break ;;
@@ -167,7 +177,7 @@ fi
 
 # ---------------------------------------------------------------------------
 log "Deleting store ${STORE_ID}"
-del_code="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "${API}/stores/${STORE_ID}")"
+del_code="$(api -sS -o /dev/null -w '%{http_code}' -X DELETE "${API}/stores/${STORE_ID}")"
 [[ "${del_code}" == "202" || "${del_code}" == "200" ]] || fail "DELETE returned ${del_code}"
 NAMESPACE="store-${STORE_ID}"
 STORE_ID_FOR_CHECK="${STORE_ID}"
@@ -183,10 +193,10 @@ done
 leaked_pv="$(kubectl get pv -o json | jq -r --arg ns "${NAMESPACE}" '[.items[] | select(.spec.claimRef.namespace == $ns)] | length')"
 [[ "${leaked_pv}" == "0" ]] || fail "${leaked_pv} PersistentVolume(s) still bound to ${NAMESPACE}"
 
-gone_code="$(curl -sS -o /dev/null -w '%{http_code}' "${API}/stores/${STORE_ID_FOR_CHECK}")"
+gone_code="$(api -sS -o /dev/null -w '%{http_code}' "${API}/stores/${STORE_ID_FOR_CHECK}")"
 [[ "${gone_code}" == "404" ]] || fail "API still returns ${gone_code} for deleted store"
 
-audit_count="$(curl -fsS "${API}/audit?storeId=${STORE_ID_FOR_CHECK}" | jq 'length')"
+audit_count="$(api -fsS "${API}/audit?storeId=${STORE_ID_FOR_CHECK}" | jq 'length')"
 log "Audit entries recorded for store: ${audit_count}"
 
 ok "Namespace ${NAMESPACE} removed, no PersistentVolumes leaked. All checks passed."

@@ -1,4 +1,12 @@
-{{- if .Values.api.persistence.enabled }}
+{{- $postgres := eq .Values.audit.backend "postgres" -}}
+{{- if and $postgres (not .Values.postgres.enabled) -}}
+{{- fail "audit.backend=postgres requires postgres.enabled=true" -}}
+{{- end -}}
+{{- if and (not $postgres) (or (gt (int .Values.api.replicas) 1) .Values.autoscaling.enabled) -}}
+{{- fail "more than one API replica (or autoscaling) requires audit.backend=postgres" -}}
+{{- end -}}
+{{- $sqlitePvc := and (not $postgres) .Values.api.persistence.enabled -}}
+{{- if $sqlitePvc }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -24,9 +32,19 @@ metadata:
     {{- include "platform.labels" . | nindent 4 }}
     app.kubernetes.io/component: api
 spec:
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.api.replicas }}
+  {{- end }}
   strategy:
+    {{- if $sqlitePvc }}
+    # A single RWO SQLite volume cannot be mounted by old and new pods at once.
     type: Recreate
+    {{- else }}
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+    {{- end }}
   selector:
     matchLabels:
       app.kubernetes.io/instance: {{ .Release.Name }}
@@ -38,6 +56,7 @@ spec:
         app.kubernetes.io/component: api
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/users: {{ toJson .Values.auth | sha256sum }}
     spec:
       serviceAccountName: {{ include "platform.serviceAccountName" . }}
       terminationGracePeriodSeconds: 60
@@ -48,6 +67,16 @@ spec:
         fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/instance: {{ .Release.Name }}
+                    app.kubernetes.io/component: api
       containers:
         - name: api
           image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
@@ -63,6 +92,25 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- if $postgres }}
+            - name: PGHOST
+              value: {{ include "platform.fullname" . }}-postgres
+            - name: PGPORT
+              value: "5432"
+            - name: PGUSER
+              value: platform
+            - name: PGDATABASE
+              value: platform
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "platform.fullname" . }}-postgres
+                  key: password
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -78,7 +126,7 @@ spec:
             httpGet:
               path: /healthz
               port: http
-            initialDelaySeconds: 10
+            initialDelaySeconds: 20
             periodSeconds: 20
           resources:
             {{- toYaml .Values.api.resources | nindent 12 }}
@@ -87,9 +135,14 @@ spec:
               mountPath: /data
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.auth.enabled }}
+            - name: auth
+              mountPath: /etc/platform-auth
+              readOnly: true
+            {{- end }}
       volumes:
         - name: data
-          {{- if .Values.api.persistence.enabled }}
+          {{- if $sqlitePvc }}
           persistentVolumeClaim:
             claimName: {{ include "platform.fullname" . }}-api-data
           {{- else }}
@@ -97,3 +150,8 @@ spec:
           {{- end }}
         - name: tmp
           emptyDir: {}
+        {{- if .Values.auth.enabled }}
+        - name: auth
+          secret:
+            secretName: {{ include "platform.fullname" . }}-auth
+        {{- end }}

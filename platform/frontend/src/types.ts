@@ -7,12 +7,34 @@ export interface StoreUrls {
   admin: string;
   alternateStorefront: string | null;
   alternateAdmin: string | null;
+  custom: string[];
+}
+
+export interface AuthUser {
+  name: string;
+  role: 'admin' | 'user';
+  maxStores: number;
+}
+
+export interface Me {
+  user: AuthUser;
+  quota: { used: number; max: number };
+}
+
+export interface DomainCheck {
+  domain: string;
+  ok: boolean;
+  resolvesTo: string[];
+  expected: string;
+  error: string | null;
 }
 
 export interface Store {
   id: string;
   name: string;
   engine: EngineType;
+  owner: string | null;
+  customDomains: string[];
   catalog: string;
   catalogLabel: string;
   productCount: number;
@@ -59,6 +81,11 @@ export interface PlatformInfo {
   kubernetesReachable: boolean;
   lastReconcileAt: string | null;
   quota: { used: number; max: number };
+  userQuota: { used: number; max: number };
+  user: AuthUser;
+  authEnabled: boolean;
+  orchestrator: { instance: string; leader: string | null; leaderElection: boolean; auditBackend: string };
+  ingress: { address: string; hostname: string | null };
   engines: Array<{ type: EngineType; displayName: string; available: boolean; description: string }>;
   catalogs: Array<{ type: string; label: string; description: string }>;
   baseDomain: string;

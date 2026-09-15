@@ -190,12 +190,19 @@ If teardown fails, it is audited as `STORE_DELETE_FAILED` and the reconciler ret
 
 ## 5. Security
 
+### Authentication and per-user quotas
+
+- The platform chart renders a `store-platform-auth` Secret with one random 40-character token per user in `auth.users`. Tokens are generated on first install and kept on upgrade (`lookup`), so they never appear in source or values files.
+- The API hashes tokens with SHA-256 at startup and compares with `timingSafeEqual` against every user, so response time does not reveal which user matched.
+- Every store carries a `platform.io/owner` label. `list`, `get`, `delete`, `domains` and `audit` are filtered by owner; a store owned by someone else returns 404, not 403, so ids cannot be probed.
+- Quotas: `maxStores` per user and `orchestrator.maxStores` for the platform, both checked inside the global create lock.
+
 ### Exposure: public versus internal-only
 
 | Surface | Reachable from | How |
 |---------|----------------|-----|
 | Dashboard (`/`) | Public, through Ingress NGINX | `platform.<domain>`; static files only |
-| Orchestrator API (`/api/*`, `/healthz`) | Public, through Ingress NGINX | Same host as the dashboard; rate limited, schema validated, **no end-user authentication** (put SSO or an IP allow-list in front in production, see README) |
+| Orchestrator API (`/api/*`, `/healthz`) | Public, through Ingress NGINX | Same host as the dashboard; every `/api/*` call needs a per-user bearer token; rate limited per user; schema validated |
 | Storefront and `/wp-admin` | Public, through Ingress NGINX | `store-<id>.<domain>`; WordPress login protects admin |
 | `/metrics`, `/readyz` | Cluster-internal only | Not routed by the Ingress; `/metrics` through Ingress returns the dashboard HTML |
 | MariaDB (3306) | Its own store namespace only | ClusterIP Service + NetworkPolicy; verified that a pod in another namespace cannot connect |
@@ -238,7 +245,7 @@ All pods use `seccompProfile: RuntimeDefault` and `allowPrivilegeEscalation: fal
 
 - JSON schema validation on every body, param and query; `additionalProperties: false`; 16 KiB body limit.
 - Store names are restricted to `[A-Za-z0-9 _.-]`, ids to `[a-z0-9]{3,20}`, so no user input reaches a shell or a Kubernetes name unchecked. Helm is spawned with an argument array, never a shell string.
-- Per-IP rate limit on POST and DELETE (30/min by default).
+- Rate limit on POST, PUT and DELETE (30/min by default), keyed per authenticated user.
 - `trustProxy` so audit entries record the real client IP from Ingress NGINX.
 
 ## 6. Scaling and abuse prevention
@@ -248,6 +255,8 @@ All pods use `seccompProfile: RuntimeDefault` and `allowPrivilegeEscalation: fal
 | Control | Where | Default |
 |---------|-------|---------|
 | Max active stores | API, counted from namespaces | 10 → `429 STORE_QUOTA_EXCEEDED` |
+| Max stores per user | API, counted from `platform.io/owner` labels | `admin` 10, `demo` 2 → `429 USER_QUOTA_EXCEEDED` |
+| Custom domains per store | API | 3; platform domains reserved; one store per domain |
 | Mutation rate limit | API, per client IP | 30 POST/DELETE per minute |
 | Concurrent installs | API semaphore | 3 |
 | Per-store resources | ResourceQuota + LimitRange | see section 3 |
@@ -256,13 +265,16 @@ All pods use `seccompProfile: RuntimeDefault` and `allowPrivilegeEscalation: fal
 
 ### Scaling the orchestrator horizontally
 
-The design keeps the path to many replicas short:
+Implemented and running by default with 2 API and 2 dashboard replicas:
 
-- **Already safe across replicas:** store state lives in namespace annotations; idempotent create relies on Kubernetes name uniqueness; Helm's release lock prevents two replicas from installing the same release at once, and the lock error is treated as "retry later".
-- **Needs changes before `replicas > 1`:**
-  1. Move the audit log from SQLite to Postgres (the `AuditLog` class is the only storage seam).
-  2. Run the reconciler on one leader using a `coordination.k8s.io` Lease, or shard stores by hashing the id across replicas.
-  3. Enforce the global store limit atomically across replicas. A `ResourceQuota` cannot count namespaces because namespaces are cluster scoped, so replace the in-process mutex with a Lease-guarded check or a Postgres row lock.
+- **Stateless request path:** store state lives in namespace annotations, so any replica can answer any request.
+- **Shared audit log:** Postgres (`audit.backend=postgres`) replaces per-pod SQLite. Writes are queued per replica and never block a request.
+- **Single writer for the cluster:** a `coordination.k8s.io` Lease (`store-platform-reconciler`, 15 s) elects one replica to run the reconciler, Helm installs and teardowns. Replicas that are not leader only record intent (namespace with status Provisioning or Deleting); the leader picks it up within one reconcile interval. A replica that loses the lease stops acting once its own lease could have expired, and `replaceNamespacedLease` uses the resourceVersion, so two replicas cannot both take over.
+- **Atomic quotas across replicas:** `pg_advisory_lock` wraps "count stores, check platform and user quota, create namespace". A `ResourceQuota` cannot count namespaces because they are cluster scoped.
+- **Idempotency across replicas:** the store id is derived from the user and the idempotency key, so a retried create that lands on another replica collides on the namespace name.
+- **Provisioning throughput:** the leader caps concurrent Helm installs (`maxConcurrentProvisions`). To go past one leader's throughput, shard by store id across several Leases, or move to an operator with a work queue.
+- **Autoscaling:** `values-prod.yaml` enables an HPA on API CPU (2–5 replicas); PodDisruptionBudgets keep at least one API and one dashboard pod during node drains.
+- **Known limit:** the rate limiter is in memory per replica, so the effective limit is per replica. A Redis store for `@fastify/rate-limit` would make it global.
 
 ### Scaling stores
 
@@ -281,6 +293,8 @@ The design keeps the path to many replicas short:
 | NetworkPolicy | kindnet (Kind ≥ 0.24) | kube-router (built into k3s) | Calico or Cilium |
 | Images | Built locally and `kind load`ed; store images pre-pulled | Pulled from a registry | Registry with pull-through cache |
 | Resource profile | `values-local.yaml`: relaxed limits | `values-prod.yaml`: strict quota | `values-prod.yaml` plus node autoscaling |
+| Custom domains | `/etc/hosts` entry to 127.0.0.1 | Customer creates `A → VPS IP`; cert-manager issues `store-<id>-custom-tls` | CNAME to the load balancer hostname (`publicIngressHostname`) |
+| Platform install | `make setup && make deploy` (local image build) | `scripts/install-vps.sh` with GHCR images built by GitHub Actions | Same chart with a registry and managed database values |
 | Redirects | HTTP only, `WP_HOME=http://…` | `X-Forwarded-Proto: https` mapped to `$_SERVER['HTTPS']='on'`, `WP_HOME=https://…` | Same as VPS |
 
 The only inputs that change between environments are `STORE_VALUES_PROFILE`, `STORE_BASE_DOMAIN`, `STORE_TLS` and the platform ingress values. The charts, images and code are the same.
@@ -299,8 +313,11 @@ The only inputs that change between environments are `STORE_VALUES_PROFILE`, `ST
 | Database | One MariaDB StatefulSet per store | A shared managed MySQL with a schema per store | Full data isolation and clean deletion. Cost: about 150m CPU and 192Mi memory per store even when idle. |
 | Store bootstrap | WP-CLI seeder Job on a shared RWO volume | A pre-baked WordPress image with WooCommerce and content | Stays on official images and pins versions through values. Cost: every new store downloads WooCommerce and Storefront (network dependency, about 20 s) and the RWO volume ties the seeder to the WordPress node. |
 | Readiness | Reconciler polls every 5 s | Kubernetes watches / informers | Simple and restart-safe. Cost: status can lag by up to one interval and each pass lists namespaces. |
-| Audit log | SQLite on a PVC | Postgres | Zero extra infrastructure locally. Cost: the API runs as a single replica; horizontal scaling needs Postgres (section 6). |
-| Global store limit | In-process mutex around count and create | Distributed lock or DB constraint | Correct for one replica. Cost: two replicas could briefly exceed the limit by one. |
+| Audit log | Postgres StatefulSet (SQLite still supported for one replica) | Managed database | Lets API replicas share one log and one create lock. Cost: one more stateful component to back up; a single Postgres pod is not highly available. |
+| Replica coordination | Lease-based leader runs all cluster writes | Every replica reconciles, relying on Helm locks | No duplicate installs and a simple mental model. Cost: provisioning throughput is bounded by one leader until stores are sharded. |
+| Global and per-user quota | `pg_advisory_lock` around count and create | Kubernetes admission webhook counting namespaces | Works with the existing API and is correct across replicas. Cost: the lock depends on Postgres being available; creates fail fast if it is not. |
+| Authentication | Static per-user bearer tokens from a Helm-generated Secret | OIDC / SSO | No external identity provider needed and easy to demo. Cost: token rotation is manual and there is no self-service sign-up. |
+| Custom domains | Helm upgrade adds hosts and a separate certificate | Wildcard TLS with a proxy per domain | Reuses the store chart and cert-manager. Cost: each change re-runs the (idempotent) seeder Job, and HTTP-01 needs DNS to point at the VPS before the certificate issues. |
 | Idempotency key | Store id derived from `sha256(key)` | Stored key-to-id table | Kubernetes name uniqueness makes duplicates impossible even across replicas. Cost: an 8-character id space per key, which is ample for this scale. |
 | Local domain | `*.127.0.0.1.nip.io` plus `*.localhost` alias | `/etc/hosts` entries or a local DNS server | No machine changes. Cost: depends on public DNS for nip.io, which some networks and embedded browsers block, hence the alias. |
 | Catalog content | Built-in store types, keyword detection and custom product lists, with generated images | Real product imports or AI-generated catalogs | Deterministic, offline and fast. Cost: product images are generated placeholders, and detection only knows 19 store types. |

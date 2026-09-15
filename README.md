@@ -34,6 +34,8 @@ After `make deploy`:
 | A store | http://store-&lt;id&gt;.127.0.0.1.nip.io |
 | Store admin | http://store-&lt;id&gt;.127.0.0.1.nip.io/wp-admin |
 
+**Sign in.** The dashboard and API require a token. `make deploy` prints one per user, and `make tokens` prints them again. Two users are created: `admin` (sees every store, 10-store quota) and `demo` (sees only its own stores, 2-store quota). Users are defined in `charts/platform/values.yaml` under `auth.users`. Tokens are generated into a Kubernetes Secret, never stored in source.
+
 `nip.io` is public wildcard DNS: `anything.127.0.0.1.nip.io` resolves to `127.0.0.1`, so no `/etc/hosts` edits are needed. If your network blocks DNS rebinding answers for 127.0.0.1, add the hostnames to `/etc/hosts` manually.
 
 Other targets: `make lint` (helm lint, TypeScript, bash syntax), `make build` (compile both apps without a cluster), `make status`, `make logs`.
@@ -133,7 +135,18 @@ kubectl get networkpolicy,limitrange -n store-<id>
 | POST | `/api/stores` | Body `{ name, engine: "woocommerce" \| "medusa", catalog?: "auto" \| "apparel" \| "books" \| "electronics" \| "coffee", idempotencyKey? }`. 202 created, 200 idempotent replay, 409/422 key conflict, 429 quota, 501 engine unavailable. The key can also be sent as an `Idempotency-Key` header. |
 | GET | `/api/stores/:id` | Store plus live pod health, Helm release presence and seeder Job state. |
 | DELETE | `/api/stores/:id` | 202. Uninstalls the release and deletes the namespace asynchronously. |
-| GET | `/api/audit?limit=&storeId=` | Recent audit events, newest first. |
+| GET | `/api/audit?limit=&storeId=` | Recent audit events, newest first. Users see events for their own stores only. |
+| GET | `/api/me` | Current user, role and personal store quota. |
+| PUT | `/api/stores/:id/domains` | Body `{ domains: string[] }` (max 3). Attaches customer domains to a Ready store; updates the Ingress through Helm. |
+| GET | `/api/stores/:id/domains/check` | DNS check per domain against the platform ingress address. |
+| GET | `/api/metrics/summary` | Dashboard totals (stores created, success rate, provisioning time). |
+
+Every `/api/*` call needs `Authorization: Bearer <token>`. `/healthz`, `/readyz` and `/metrics` do not (and only `/healthz` is routed publicly).
+
+```bash
+TOKEN=$(make -s tokens | awk '$1=="admin"{print $NF}')
+curl -s -H "Authorization: Bearer $TOKEN" http://platform.127.0.0.1.nip.io/api/stores | jq
+```
 
 ### Developing without rebuilding images
 
@@ -156,6 +169,57 @@ When you run the API outside the cluster it uses your own kubeconfig identity, s
 | Store stuck in Provisioning | `kubectl get pods,jobs -n store-<id>` and `kubectl logs -n store-<id> job/store-<id>-seeder`. The seeder downloads WooCommerce from wordpress.org, so the cluster needs internet access. |
 | Store Failed with timeout | Slow first image pull. `make deploy` pre-pulls the store images; raise `orchestrator.provisionTimeoutSeconds` if your network is slow. A store that finishes later moves from Failed to Ready automatically. |
 | Dashboard shows "Platform degraded" | `make logs`; the API cannot reach the Kubernetes API or helm failed. |
+
+---
+
+## Users, quotas and custom domains
+
+### Per-user quotas
+
+- Each user has `maxStores` in `auth.users`. Creating a store beyond it returns `429 USER_QUOTA_EXCEEDED`; the platform-wide `orchestrator.maxStores` still applies on top.
+- A store records its owner in the `platform.io/owner` namespace label. Users list, open, delete and audit only their own stores; another user's store returns 404. Admins see everything.
+- Rate limits (30 creates/deletes per minute) are keyed per user, not per IP.
+- Every audit entry records the acting user and IP: `demo (10.244.0.1)`.
+
+### Link a customer domain to a store
+
+1. In the dashboard, click **Domains** on a Ready store and enter up to 3 domains, for example `shop.example.com`.
+2. At the DNS provider create `A shop.example.com → <orchestrator.publicIngressAddress>` (or a CNAME to `orchestrator.publicIngressHostname`).
+3. Save. The orchestrator runs `helm upgrade` on the store with `global.customDomains`: the Ingress gains the host, WordPress accepts it, and on TLS clusters cert-manager issues a separate `store-<id>-custom-tls` certificate.
+4. **Check DNS** shows whether each domain already points at the platform.
+
+Domains under the platform domains (`*.127.0.0.1.nip.io`, `*.localhost`, `stores.<domain>`) are rejected, and a domain can belong to only one store.
+
+Local test on Kind:
+
+```bash
+echo "127.0.0.1 shop.speedyrc.test" | sudo tee -a /etc/hosts
+open http://shop.speedyrc.test
+# or without editing /etc/hosts
+curl -H 'Host: shop.speedyrc.test' http://127.0.0.1/ | grep '<title>'
+```
+
+---
+
+## Horizontal scaling
+
+What runs where by default:
+
+| Component | Replicas | How it scales |
+|-----------|----------|---------------|
+| Dashboard | 2 | Stateless nginx; PodDisruptionBudget and anti-affinity |
+| Orchestrator API | 2 (HPA 2–5 on CPU in `values-prod.yaml`) | Every replica serves the API. One replica holds the `store-platform-reconciler` Lease and runs the reconciler, installs and teardowns. |
+| Audit database | 1 Postgres StatefulSet | Shared by all API replicas; NetworkPolicy allows only API pods |
+
+- **Create on any replica:** the replica writes the namespace with status Provisioning. The leader's reconciler installs it within one interval (5 s).
+- **Concurrency control:** a Postgres advisory lock makes "count stores, check quotas, create namespace" atomic across replicas; the leader caps concurrent Helm installs (`maxConcurrentProvisions`, default 3).
+- **Failover:** delete the leader pod and another replica acquires the Lease within about 15 s and resumes in-flight provisioning and deletions. The dashboard footer shows which replica served the page and which one is leader.
+- Setting `audit.backend=sqlite` keeps the old single-replica mode; the chart refuses `replicas > 1` with SQLite.
+
+```bash
+kubectl get lease -n store-platform store-platform-reconciler -o jsonpath='{.spec.holderIdentity}'
+kubectl scale deploy/store-platform-api -n store-platform --replicas=3
+```
 
 ---
 
@@ -242,6 +306,23 @@ curl -s localhost:8080/metrics | grep '^store_platform_'
 ## Production VPS deployment (k3s)
 
 Target: a single VPS (4 vCPU / 8 GB is enough for about 8–10 stores) with a public IP and a domain you control.
+
+### Quick path
+
+1. Push to `main`. The GitHub Actions workflow (`.github/workflows/ci.yml`) lints and typechecks, then builds and pushes `ghcr.io/<owner>/<repo>/api` and `/dashboard`. Make the two packages public in GitHub (Packages → Package settings), or add an image pull secret.
+2. Point DNS at the VPS: `A platform.example.com` and `A *.stores.example.com`.
+3. On the VPS:
+
+   ```bash
+   git clone https://github.com/geekyhead/Urumi-system-design.git && cd Urumi-system-design
+   sudo ./scripts/install-vps.sh --domain example.com --email ops@example.com
+   ```
+
+The script installs k3s without Traefik, Ingress NGINX, cert-manager and a `letsencrypt-prod` ClusterIssuer, then installs the platform with `charts/platform/values-prod.yaml` and prints the sign-in tokens. It is idempotent, so re-run it to upgrade.
+
+What `values-prod.yaml` changes compared with local: GHCR images with `pullPolicy: Always`, store profile `prod` (strict quotas, `local-path` storage, TLS through cert-manager), no `*.localhost` aliases, HTTPS platform Ingress, API HorizontalPodAutoscaler (k3s ships metrics-server), larger Postgres volume.
+
+The manual steps below do the same thing one command at a time.
 
 ### 1. DNS
 
@@ -337,7 +418,7 @@ Stores created from `https://platform.example.com` are served at `https://store-
 
 ### 7. Protect the dashboard
 
-The platform ships without end-user authentication. Before exposing it publicly, put it behind your SSO, for example with ingress-nginx external auth:
+The API requires per-user bearer tokens (`make tokens`), and each user is limited to their own stores and quota. Rotate a token by deleting its entry from the `store-platform-auth` Secret and running `helm upgrade`. For company SSO, you can additionally put the dashboard behind ingress-nginx external auth:
 
 ```bash
 --set-string 'ingress.annotations.nginx\.ingress\.kubernetes\.io/auth-url=https://auth.example.com/oauth2/auth'

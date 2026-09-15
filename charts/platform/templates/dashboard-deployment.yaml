@@ -18,6 +18,16 @@ spec:
         app.kubernetes.io/component: dashboard
     spec:
       automountServiceAccountToken: false
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/instance: {{ .Release.Name }}
+                    app.kubernetes.io/component: dashboard
       securityContext:
         runAsNonRoot: true
         runAsUser: 101

@@ -1,4 +1,4 @@
-import { CheckCircle2, CirclePlus, Loader2, RefreshCw, Repeat, ShieldAlert, Trash2, X, XCircle } from 'lucide-react';
+import { CheckCircle2, CirclePlus, Globe, Loader2, RefreshCw, Repeat, ShieldAlert, Trash2, X, XCircle } from 'lucide-react';
 import { useCallback, useEffect, useState, type ComponentType } from 'react';
 import { api } from '../api';
 import { localTime, relativeTime } from '../format';
@@ -22,6 +22,7 @@ const ACTION_STYLE: Record<string, { icon: ComponentType<{ className?: string }>
   STORE_DELETE_REQUESTED: { icon: Trash2, className: 'text-slate-300 bg-slate-500/10', label: 'Delete requested' },
   STORE_DELETED: { icon: Trash2, className: 'text-slate-300 bg-slate-500/10', label: 'Deleted' },
   STORE_DELETE_FAILED: { icon: XCircle, className: 'text-rose-300 bg-rose-500/10', label: 'Delete failed' },
+  STORE_DOMAINS_UPDATED: { icon: Globe, className: 'text-indigo-300 bg-indigo-500/10', label: 'Domains updated' },
 };
 
 const FALLBACK_STYLE = { icon: CirclePlus, className: 'text-slate-300 bg-slate-500/10', label: 'Event' };

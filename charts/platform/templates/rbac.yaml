@@ -41,6 +41,33 @@ subjects:
     name: {{ include "platform.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 ---
+# Leader election: the API replicas coordinate through one Lease in their own namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "platform.fullname" . }}-leader-election
+  labels:
+    {{- include "platform.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "platform.fullname" . }}-leader-election
+  labels:
+    {{- include "platform.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "platform.fullname" . }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "platform.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
 # Tenant scope: never bound cluster-wide. The orchestrator creates a
 # RoleBinding to this role inside each store-<id> namespace it owns, so these
 # rights (including Helm release Secrets) exist only in store namespaces.

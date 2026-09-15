@@ -5,9 +5,9 @@ api:
     repository: store-platform/api
     tag: local
     pullPolicy: IfNotPresent
-  # The audit log is SQLite on a PVC, so the API runs as a single replica.
-  # See SYSTEM_DESIGN.md for the horizontal scaling path.
-  replicas: 1
+  # More than one replica needs audit.backend=postgres. Every replica serves
+  # the API; a Kubernetes Lease picks the one replica that runs the reconciler.
+  replicas: 2
   logLevel: info
   resources:
     requests:
@@ -16,6 +16,7 @@ api:
     limits:
       cpu: 500m
       memory: 512Mi
+  # Only used when audit.backend=sqlite.
   persistence:
     enabled: true
     size: 256Mi
@@ -26,7 +27,7 @@ dashboard:
     repository: store-platform/dashboard
     tag: local
     pullPolicy: IfNotPresent
-  replicas: 1
+  replicas: 2
   resources:
     requests:
       cpu: 25m
@@ -49,6 +50,51 @@ orchestrator:
   reconcileIntervalMs: 5000
   helmTimeout: 5m
   mutationRateLimitPerMinute: 30
+  # Custom domains: customers create an A record to this address (or a CNAME
+  # to publicIngressHostname). Local Kind uses 127.0.0.1.
+  publicIngressAddress: "127.0.0.1"
+  publicIngressHostname: ""
+  maxCustomDomains: 3
+  leaderElection: true
+
+auth:
+  enabled: true
+  # Tokens are generated into the <release>-auth Secret on first install and
+  # kept on upgrades. Read them with `make tokens`.
+  users:
+    - name: admin
+      role: admin
+      maxStores: 10
+    - name: demo
+      role: user
+      maxStores: 2
+
+audit:
+  # postgres: shared by all API replicas. sqlite: single replica only.
+  backend: postgres
+
+postgres:
+  enabled: true
+  image: postgres:16-alpine
+  storage: 1Gi
+  storageClass: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 96Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+autoscaling:
+  # Requires metrics-server (bundled with k3s; not installed on Kind).
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
 
 rbac:
   # Denies the API ServiceAccount any namespace/RoleBinding write outside

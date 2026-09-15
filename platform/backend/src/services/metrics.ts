@@ -7,6 +7,8 @@ export interface MetricsSources {
   stores: () => StoreRecord[] | null;
   audit: AuditLog;
   maxStores: number;
+  instance: string;
+  isLeader: () => boolean;
 }
 
 export interface MetricsSummary {
@@ -30,7 +32,7 @@ function percentile(sorted: number[], p: number): number | null {
 /**
  * Prometheus metrics for the platform. Lifetime counters are derived from the
  * persistent audit log and store gauges from the reconciler, so the numbers
- * survive API restarts instead of resetting to zero.
+ * survive API restarts and agree across replicas sharing one audit database.
  */
 export class PlatformMetrics {
   readonly registry = new Registry();
@@ -39,6 +41,7 @@ export class PlatformMetrics {
 
   constructor(private readonly sources: MetricsSources) {
     collectDefaultMetrics({ register: this.registry, prefix: 'store_platform_process_' });
+    this.registry.setDefaultLabels({ instance_pod: sources.instance });
 
     new Gauge({
       name: 'store_platform_stores',
@@ -62,14 +65,23 @@ export class PlatformMetrics {
       },
     });
 
+    new Gauge({
+      name: 'store_platform_orchestrator_leader',
+      help: '1 when this API replica holds the reconciler lease.',
+      registers: [this.registry],
+      collect() {
+        this.set(sources.isLeader() ? 1 : 0);
+      },
+    });
+
     new Counter({
       name: 'store_platform_lifecycle_events_total',
       help: 'Store lifecycle events recorded in the audit log, by action.',
       labelNames: ['action'] as const,
       registers: [this.registry],
-      collect() {
+      async collect() {
         this.reset();
-        for (const [action, count] of Object.entries(sources.audit.countByAction())) {
+        for (const [action, count] of Object.entries(await sources.audit.countByAction())) {
           this.inc({ action }, count);
         }
       },
@@ -80,9 +92,9 @@ export class PlatformMetrics {
       help: 'Lifetime number of distinct stores per outcome (each store counted once).',
       labelNames: ['outcome'] as const,
       registers: [this.registry],
-      collect() {
+      async collect() {
         this.reset();
-        const outcomes = sources.audit.storeOutcomes();
+        const outcomes = await sources.audit.storeOutcomes();
         for (const outcome of ['created', 'ready', 'failed', 'deleted'] as const) {
           this.set({ outcome }, outcomes[outcome]);
         }
@@ -99,7 +111,7 @@ export class PlatformMetrics {
 
     this.provisioningDuration = new Histogram({
       name: 'store_platform_provisioning_duration_seconds',
-      help: 'Time from store creation to Ready or Failed, observed by this API process.',
+      help: 'Time from store creation to Ready or Failed, observed by the leader replica.',
       labelNames: ['engine', 'outcome'] as const,
       buckets: [30, 60, 90, 120, 150, 180, 240, 300, 600],
       registers: [this.registry],
@@ -118,13 +130,15 @@ export class PlatformMetrics {
     return { contentType: this.registry.contentType, body: await this.registry.metrics() };
   }
 
-  summary(): MetricsSummary {
+  async summary(): Promise<MetricsSummary> {
     const stores = this.sources.stores() ?? [];
     const byStatus: Record<string, number> = { Provisioning: 0, Ready: 0, Failed: 0, Deleting: 0 };
     for (const store of stores) byStatus[store.status] = (byStatus[store.status] ?? 0) + 1;
 
-    const outcomes = this.sources.audit.storeOutcomes();
-    const durations = this.sources.audit.recentProvisioningDurations(200);
+    const [outcomes, durations] = await Promise.all([
+      this.sources.audit.storeOutcomes(),
+      this.sources.audit.recentProvisioningDurations(200),
+    ]);
     const sorted = [...durations].sort((a, b) => a - b);
     const average = durations.length ? Math.round(durations.reduce((sum, d) => sum + d, 0) / durations.length) : null;
 

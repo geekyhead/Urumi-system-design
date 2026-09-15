@@ -36,6 +36,7 @@ export class WooCommerceEngineProvider implements EngineProvider {
       admin: `${storefront}/wp-admin`,
       alternateStorefront,
       alternateAdmin: alternateStorefront ? `${alternateStorefront}/wp-admin` : null,
+      custom: store.customDomains.map((domain) => `${scheme}://${domain}`),
     };
   }
 
@@ -47,7 +48,12 @@ export class WooCommerceEngineProvider implements EngineProvider {
       valuesFiles: [ctx.config.storeValuesFile],
       values: {
         store: { id: store.id, name: store.name, accentColor: store.accentColor, catalogData: store.catalog },
-        global: { baseDomain: ctx.config.baseDomain, tls: ctx.config.tls, aliasDomains: ctx.config.storeAliasDomains },
+        global: {
+          baseDomain: ctx.config.baseDomain,
+          tls: ctx.config.tls,
+          aliasDomains: ctx.config.storeAliasDomains,
+          customDomains: store.customDomains,
+        },
       },
       timeout: ctx.config.helmTimeout,
       // Readiness is tracked by the reconciler, not by blocking on helm.

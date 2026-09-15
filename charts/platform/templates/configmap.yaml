@@ -17,5 +17,13 @@ data:
   RECONCILE_INTERVAL_MS: {{ .Values.orchestrator.reconcileIntervalMs | quote }}
   HELM_TIMEOUT: {{ .Values.orchestrator.helmTimeout | quote }}
   MUTATION_RATE_LIMIT_PER_MINUTE: {{ .Values.orchestrator.mutationRateLimitPerMinute | quote }}
+  PUBLIC_INGRESS_ADDRESS: {{ .Values.orchestrator.publicIngressAddress | quote }}
+  PUBLIC_INGRESS_HOSTNAME: {{ .Values.orchestrator.publicIngressHostname | quote }}
+  MAX_CUSTOM_DOMAINS: {{ .Values.orchestrator.maxCustomDomains | quote }}
+  LEADER_ELECTION: {{ .Values.orchestrator.leaderElection | quote }}
+  LEASE_NAME: {{ printf "%s-reconciler" (include "platform.fullname" .) | quote }}
+  AUDIT_BACKEND: {{ .Values.audit.backend | quote }}
+  AUTH_ENABLED: {{ .Values.auth.enabled | quote }}
+  AUTH_USERS_FILE: /etc/platform-auth/users.json
   SERVICE_ACCOUNT_NAME: {{ include "platform.serviceAccountName" . | quote }}
   TENANT_CLUSTER_ROLE: {{ include "platform.tenantRoleName" . | quote }}

@@ -23,6 +23,15 @@ spec:
     - hosts:
         - {{ include "store.host" . | quote }}
       secretName: {{ .Release.Name }}-tls
+    {{- with .Values.global.customDomains }}
+    # Customer domains get their own certificate so adding one never
+    # re-issues the platform subdomain certificate.
+    - hosts:
+        {{- range . }}
+        - {{ lower . | quote }}
+        {{- end }}
+      secretName: {{ $.Release.Name }}-custom-tls
+    {{- end }}
   {{- end }}
   rules:
     {{- range (include "store.hosts" . | fromJsonArray) }}

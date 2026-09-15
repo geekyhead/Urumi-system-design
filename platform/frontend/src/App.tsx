@@ -1,15 +1,19 @@
-import { Activity, AlertTriangle, History, Loader2, Plus, ServerCog } from 'lucide-react';
+import { Activity, AlertTriangle, History, Loader2, LogOut, Plus, ServerCog, UserRound } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
-import { ApiError, api } from './api';
+import { AUTH_REQUIRED_EVENT, ApiError, api, tokenStore } from './api';
 import { AuditLogView } from './components/AuditLogView';
 import { CreateStoreModal } from './components/CreateStoreModal';
+import { DomainsModal } from './components/DomainsModal';
+import { LoginScreen } from './components/LoginScreen';
 import { MetricsBar } from './components/MetricsBar';
 import { StoreList } from './components/StoreList';
-import type { MetricsSummary, PlatformInfo, Store } from './types';
+import type { Me, MetricsSummary, PlatformInfo, Store } from './types';
 
 const POLL_INTERVAL_MS = 5000;
 
 export default function App() {
+  const [me, setMe] = useState<Me | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
   const [stores, setStores] = useState<Store[]>([]);
   const [platform, setPlatform] = useState<PlatformInfo | null>(null);
   const [metrics, setMetrics] = useState<MetricsSummary | null>(null);
@@ -17,10 +21,22 @@ export default function App() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [auditOpen, setAuditOpen] = useState(false);
+  const [domainsStore, setDomainsStore] = useState<Store | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Store | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
+
+  // Session: validate the stored token once, and drop back to sign-in on any 401.
+  useEffect(() => {
+    api
+      .me()
+      .then(setMe, () => setMe(null))
+      .finally(() => setAuthChecked(true));
+    const onAuthRequired = () => setMe(null);
+    window.addEventListener(AUTH_REQUIRED_EVENT, onAuthRequired);
+    return () => window.removeEventListener(AUTH_REQUIRED_EVENT, onAuthRequired);
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -30,6 +46,7 @@ export default function App() {
       setLoadError(null);
       api.metricsSummary().then(setMetrics, () => undefined);
     } catch (err) {
+      if (err instanceof ApiError && err.status === 401) return;
       setLoadError(err instanceof ApiError ? err.message : 'Failed to load stores');
       setPlatform((prev) => (prev ? { ...prev, status: 'degraded' } : prev));
     } finally {
@@ -39,13 +56,23 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!me) return;
     void refresh();
     const interval = setInterval(() => void refresh(), POLL_INTERVAL_MS);
     return () => clearInterval(interval);
-  }, [refresh]);
+  }, [me, refresh]);
 
   const closeCreate = useCallback(() => setCreateOpen(false), []);
   const closeAudit = useCallback(() => setAuditOpen(false), []);
+  const closeDomains = useCallback(() => setDomainsStore(null), []);
+
+  function signOut() {
+    tokenStore.clear();
+    setMe(null);
+    setStores([]);
+    setPlatform(null);
+    setMetrics(null);
+  }
 
   async function confirmDelete() {
     if (!pendingDelete) return;
@@ -63,10 +90,31 @@ export default function App() {
     }
   }
 
+  if (!authChecked) {
+    return (
+      <div className="flex min-h-screen items-center justify-center text-sm text-slate-400">
+        <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden /> Connecting…
+      </div>
+    );
+  }
+
+  if (!me) {
+    return (
+      <LoginScreen
+        onSignedIn={(signedIn) => {
+          setLoading(true);
+          setMe(signedIn);
+        }}
+      />
+    );
+  }
+
+  const isAdmin = me.user.role === 'admin';
   const activeCount = stores.filter((s) => s.status !== 'Deleting').length;
   const readyCount = stores.filter((s) => s.status === 'Ready').length;
   const provisioningCount = stores.filter((s) => s.status === 'Provisioning').length;
   const healthy = platform?.status === 'ok' && !loadError;
+  const quota = isAdmin ? platform?.quota : platform?.userQuota;
 
   return (
     <div className="min-h-screen">
@@ -84,10 +132,10 @@ export default function App() {
 
           <div className="flex flex-wrap items-center gap-3">
             <div className="flex items-center gap-2 rounded-md border border-slate-800 px-3 py-1.5 text-sm">
-              <span className="text-slate-400">Active stores</span>
+              <span className="text-slate-400">{isAdmin ? 'Active stores' : 'Your stores'}</span>
               <span className="font-semibold tabular-nums">
-                {activeCount}
-                <span className="text-slate-500">/{platform?.quota.max ?? '–'}</span>
+                {isAdmin ? activeCount : (quota?.used ?? 0)}
+                <span className="text-slate-500">/{quota?.max ?? '–'}</span>
               </span>
             </div>
             <div
@@ -108,6 +156,16 @@ export default function App() {
               <Plus className="h-4 w-4" aria-hidden />
               Create New Store
             </button>
+            <div className="flex items-center gap-2 rounded-md border border-slate-800 py-1 pl-3 pr-1 text-sm">
+              <UserRound className="h-4 w-4 text-slate-400" aria-hidden />
+              <span className="text-slate-200">{me.user.name}</span>
+              <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-slate-400">{me.user.role}</span>
+              {platform?.authEnabled !== false && (
+                <button type="button" className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-slate-200" onClick={signOut} aria-label="Sign out" title="Sign out">
+                  <LogOut className="h-4 w-4" />
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </header>
@@ -122,6 +180,11 @@ export default function App() {
             <Loader2 className={`h-4 w-4 text-amber-300 ${provisioningCount ? 'animate-spin' : ''}`} aria-hidden /> {provisioningCount} provisioning
           </span>
           <span className="text-slate-600">Auto-refresh every {POLL_INTERVAL_MS / 1000}s</span>
+          {platform && (
+            <span className="ml-auto font-mono text-xs text-slate-600" title="API replica that served this page, and the replica holding the reconciler lease">
+              served by {platform.orchestrator.instance} · leader {platform.orchestrator.leader ?? 'electing…'} · audit {platform.orchestrator.auditBackend}
+            </span>
+          )}
         </div>
 
         {loadError && (
@@ -135,7 +198,9 @@ export default function App() {
           stores={stores}
           loading={loading}
           now={now}
+          showOwner={isAdmin}
           onCreate={() => setCreateOpen(true)}
+          onDomains={(store) => setDomainsStore(store)}
           onDelete={(store) => {
             setDeleteError(null);
             setPendingDelete(store);
@@ -151,6 +216,16 @@ export default function App() {
           setCreateOpen(false);
           setStores((prev) => [store, ...prev.filter((s) => s.id !== store.id)]);
           void refresh();
+        }}
+      />
+
+      <DomainsModal
+        store={domainsStore}
+        platform={platform}
+        onClose={closeDomains}
+        onSaved={(updated) => {
+          setDomainsStore(updated);
+          setStores((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
         }}
       />
 

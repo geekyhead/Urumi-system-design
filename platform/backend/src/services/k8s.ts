@@ -3,6 +3,8 @@ import * as k8s from '@kubernetes/client-node';
 export const LABEL_MANAGED = 'platform.io/managed';
 export const LABEL_STORE_ID = 'platform.io/store-id';
 export const LABEL_ENGINE = 'platform.io/engine';
+export const LABEL_OWNER = 'platform.io/owner';
+export const ANNOTATION_CUSTOM_DOMAINS = 'platform.io/custom-domains';
 export const ANNOTATION_NAME = 'platform.io/store-name';
 export const ANNOTATION_STATUS = 'platform.io/status';
 export const ANNOTATION_REASON = 'platform.io/reason';

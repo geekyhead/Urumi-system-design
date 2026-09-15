@@ -77,8 +77,13 @@ log "Waiting for API to answer through the ingress"
 for _ in $(seq 1 60); do
   if curl -fsS "http://${PLATFORM_HOST}/healthz" >/dev/null 2>&1; then
     log "Platform is up"
-    log "Dashboard: http://${PLATFORM_HOST}"
+    log "Dashboard: http://${PLATFORM_HOST}  (or http://platform.localhost)"
     log "API:       http://${PLATFORM_HOST}/api/stores"
+    if kubectl get secret -n "${NAMESPACE}" "${RELEASE}-auth" >/dev/null 2>&1; then
+      log "Sign-in tokens (also: make tokens):"
+      kubectl get secret -n "${NAMESPACE}" "${RELEASE}-auth" -o jsonpath='{.data.users\.json}' | base64 -d \
+        | jq -r '.[] | "  \(.name) (\(.role), max \(.maxStores) stores): \(.token)"'
+    fi
     exit 0
   fi
   sleep 2

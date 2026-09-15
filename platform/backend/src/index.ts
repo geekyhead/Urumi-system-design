@@ -4,12 +4,20 @@ import Fastify from 'fastify';
 import { config } from './config.js';
 import { EngineRegistry } from './engines/index.js';
 import { storeRoutes } from './routes/stores.js';
-import { AuditLog } from './services/audit.js';
+import { createAuditLog } from './services/audit.js';
+import { Authenticator, type AuthUser } from './services/auth.js';
 import { HelmClient } from './services/helm.js';
 import { KubernetesClient } from './services/k8s.js';
+import { LeaderElector } from './services/leader.js';
 import { PlatformMetrics } from './services/metrics.js';
 import { StoreManager } from './services/storeManager.js';
 import { HttpError } from './types.js';
+
+declare module 'fastify' {
+  interface FastifyRequest {
+    user: AuthUser | null;
+  }
+}
 
 async function main(): Promise<void> {
   const app = Fastify({
@@ -18,7 +26,14 @@ async function main(): Promise<void> {
     bodyLimit: 16 * 1024,
   });
 
-  const audit = new AuditLog(config.auditDbPath, config.auditRetention, (msg) => app.log.warn(msg));
+  const warn = (msg: string) => app.log.warn(msg);
+  const audit = createAuditLog(
+    { backend: config.auditBackend, sqlitePath: config.auditDbPath, retention: config.auditRetention },
+    warn,
+  );
+  await audit.init();
+
+  const auth = new Authenticator(config.authEnabled, config.authUsersFile, config.maxStores);
   const k8s = new KubernetesClient();
   let metrics: PlatformMetrics | null = null;
   const helm = new HelmClient(config.helmBinary, undefined, (operation, result, seconds) =>
@@ -26,14 +41,53 @@ async function main(): Promise<void> {
   );
   const engines = new EngineRegistry(config);
   const stores = new StoreManager(config, k8s, helm, engines, audit, app.log);
-  metrics = new PlatformMetrics({ stores: () => stores.lastKnownStores, audit, maxStores: config.maxStores });
+
+  const leader = config.leaderElection
+    ? new LeaderElector(config.platformNamespace, config.leaseName, config.podName, config.leaseSeconds, (msg, extra) =>
+        app.log.info(extra ?? {}, msg),
+      )
+    : null;
+  if (leader) stores.setLeader(leader);
+
+  metrics = new PlatformMetrics({
+    stores: () => stores.lastKnownStores,
+    audit,
+    maxStores: config.maxStores,
+    instance: config.podName,
+    isLeader: () => stores.isLeader,
+  });
   stores.setMetrics(metrics);
   const platformMetrics = metrics;
+
+  app.log.info(
+    {
+      instance: config.podName,
+      audit: audit.backend,
+      auth: auth.enabled ? `${auth.userCount} users` : 'disabled',
+      leaderElection: Boolean(leader),
+    },
+    'orchestrator configuration',
+  );
 
   if (config.corsOrigin) {
     await app.register(cors, { origin: config.corsOrigin.split(',').map((o) => o.trim()) });
   }
-  await app.register(rateLimit, { global: false });
+
+  // Authentication runs before the rate limiter so limits are keyed per user.
+  app.decorateRequest('user', null);
+  app.addHook('onRequest', async (request, reply) => {
+    if (!request.url.startsWith('/api/')) return;
+    const user = auth.authenticate(request.headers.authorization);
+    if (!user) {
+      return reply.code(401).send({ error: 'UNAUTHORIZED', message: 'A valid API token is required' });
+    }
+    request.user = user;
+  });
+
+  await app.register(rateLimit, {
+    global: false,
+    keyGenerator: (request) => (request.user ? `user:${request.user.name}` : `ip:${request.ip}`),
+  });
 
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof HttpError) {
@@ -52,8 +106,10 @@ async function main(): Promise<void> {
 
   app.get('/healthz', async () => ({
     status: 'ok',
+    instance: config.podName,
+    leader: stores.isLeader,
     kubernetesReachable: stores.isKubernetesReachable,
-    auditPersistent: audit.persistent,
+    audit: audit.backend,
   }));
 
   // Prometheus scrape endpoint. Served on the pod port only: the Ingress routes
@@ -63,9 +119,6 @@ async function main(): Promise<void> {
     return reply.header('Content-Type', contentType).send(body);
   });
 
-  // Aggregated numbers for the dashboard (safe to expose: no tenant data).
-  app.get('/api/metrics/summary', async () => platformMetrics.summary());
-
   app.get('/readyz', async (_request, reply) => {
     const reachable = await k8s.ping();
     return reply.code(reachable ? 200 : 503).send({ status: reachable ? 'ready' : 'kubernetes-unreachable' });
@@ -74,6 +127,7 @@ async function main(): Promise<void> {
   await app.register(storeRoutes, {
     stores,
     audit,
+    metrics: platformMetrics,
     mutationRateLimitPerMinute: config.mutationRateLimitPerMinute,
   });
 
@@ -83,6 +137,7 @@ async function main(): Promise<void> {
     app.log.error({ err }, 'helm binary not usable; provisioning will fail');
   }
 
+  leader?.start();
   stores.start();
   await app.listen({ host: config.host, port: config.port });
 
@@ -93,7 +148,8 @@ async function main(): Promise<void> {
     app.log.info({ signal }, 'shutting down');
     await app.close();
     await stores.stop();
-    audit.close();
+    await leader?.stop();
+    await audit.close();
     process.exit(0);
   };
   process.on('SIGTERM', () => void shutdown('SIGTERM'));

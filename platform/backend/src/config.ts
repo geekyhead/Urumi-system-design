@@ -1,3 +1,4 @@
+import os from 'node:os';
 import path from 'node:path';
 
 function str(name: string, fallback: string): string {
@@ -57,10 +58,27 @@ export const config = {
   helmTimeout: str('HELM_TIMEOUT', '5m'),
   helmBinary: str('HELM_BINARY', 'helm'),
 
+  /** "sqlite" (single replica) or "postgres" (shared by many replicas, uses PG* env vars). */
+  auditBackend: str('AUDIT_BACKEND', 'sqlite'),
   auditDbPath: str('AUDIT_DB_PATH', path.resolve(process.cwd(), 'audit.db')),
   auditRetention: int('AUDIT_RETENTION', 5000),
 
   mutationRateLimitPerMinute: int('MUTATION_RATE_LIMIT_PER_MINUTE', 30),
+
+  /** Bearer-token auth; users, roles, quotas and tokens come from a Secret-mounted JSON file. */
+  authEnabled: bool('AUTH_ENABLED', false),
+  authUsersFile: str('AUTH_USERS_FILE', '/etc/platform-auth/users.json'),
+
+  /** Identity for leader election and logs; the Downward API sets it in the cluster. */
+  podName: str('POD_NAME', os.hostname()),
+  leaderElection: bool('LEADER_ELECTION', false),
+  leaseName: str('LEASE_NAME', 'store-platform-reconciler'),
+  leaseSeconds: int('LEASE_SECONDS', 15),
+
+  /** Where customers point custom domains (A record, or CNAME to the hostname). */
+  publicIngressAddress: str('PUBLIC_INGRESS_ADDRESS', '127.0.0.1'),
+  publicIngressHostname: str('PUBLIC_INGRESS_HOSTNAME', ''),
+  maxCustomDomains: int('MAX_CUSTOM_DOMAINS', 3),
   corsOrigin: str('CORS_ORIGIN', ''),
 } as const;
 

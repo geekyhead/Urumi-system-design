@@ -2,6 +2,8 @@ import type {
   AuditEntry,
   CatalogPreview,
   CreateStoreRequest,
+  DomainCheck,
+  Me,
   MetricsSummary,
   PlatformInfo,
   Store,
@@ -19,12 +21,49 @@ export class ApiError extends Error {
   }
 }
 
+const TOKEN_KEY = 'store-orchestrator-token';
+export const AUTH_REQUIRED_EVENT = 'store-orchestrator:auth-required';
+
+/** API token kept in localStorage; every access is guarded because storage can be unavailable. */
+export const tokenStore = {
+  get(): string | null {
+    try {
+      return window.localStorage.getItem(TOKEN_KEY);
+    } catch {
+      return null;
+    }
+  },
+  set(token: string): void {
+    try {
+      window.localStorage.setItem(TOKEN_KEY, token);
+    } catch {
+      // Private mode: the token lives only for this page load.
+    }
+    memoryToken = token;
+  },
+  clear(): void {
+    try {
+      window.localStorage.removeItem(TOKEN_KEY);
+    } catch {
+      // ignore
+    }
+    memoryToken = null;
+  },
+};
+let memoryToken: string | null = null;
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = tokenStore.get() ?? memoryToken;
   let response: Response;
   try {
     response = await fetch(path, {
       ...init,
-      headers: { Accept: 'application/json', ...(init?.body ? { 'Content-Type': 'application/json' } : {}), ...init?.headers },
+      headers: {
+        Accept: 'application/json',
+        ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...init?.headers,
+      },
     });
   } catch {
     throw new ApiError(0, 'NETWORK_ERROR', 'Cannot reach the orchestrator API');
@@ -33,6 +72,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const body: unknown = text ? safeJson(text) : null;
   if (!response.ok) {
     const err = (body ?? {}) as { error?: string; message?: string };
+    if (response.status === 401) window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT));
     throw new ApiError(response.status, err.error ?? `HTTP_${response.status}`, err.message ?? response.statusText);
   }
   return body as T;
@@ -57,6 +97,7 @@ export function newIdempotencyKey(): string {
 }
 
 export const api = {
+  me: () => request<Me>('/api/me'),
   platform: () => request<PlatformInfo>('/api/platform'),
   previewCatalog: (body: Omit<CreateStoreRequest, 'engine' | 'idempotencyKey'>, signal?: AbortSignal) =>
     request<CatalogPreview>('/api/catalogs/preview', { method: 'POST', body: JSON.stringify(body), signal }),
@@ -65,6 +106,9 @@ export const api = {
   createStore: (body: CreateStoreRequest) =>
     request<Store>('/api/stores', { method: 'POST', body: JSON.stringify(body) }),
   deleteStore: (id: string) => request<Store>(`/api/stores/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  setDomains: (id: string, domains: string[]) =>
+    request<Store>(`/api/stores/${encodeURIComponent(id)}/domains`, { method: 'PUT', body: JSON.stringify({ domains }) }),
+  checkDomains: (id: string) => request<DomainCheck[]>(`/api/stores/${encodeURIComponent(id)}/domains/check`),
   listAudit: (limit = 200) => request<AuditEntry[]>(`/api/audit?limit=${limit}`),
   metricsSummary: () => request<MetricsSummary>('/api/metrics/summary'),
 };

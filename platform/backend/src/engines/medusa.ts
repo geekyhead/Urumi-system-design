@@ -45,7 +45,13 @@ export class MedusaEngineProvider implements EngineProvider {
   urls(store: EngineStoreRef): StoreUrls {
     const scheme = this.config.tls ? 'https' : 'http';
     const storefront = `${scheme}://store-${store.id}.${this.config.baseDomain}`;
-    return { storefront, admin: `${storefront}/app`, alternateStorefront: null, alternateAdmin: null };
+    return {
+      storefront,
+      admin: `${storefront}/app`,
+      alternateStorefront: null,
+      alternateAdmin: null,
+      custom: store.customDomains.map((domain) => `${scheme}://${domain}`),
+    };
   }
 
   async provision(_store: EngineStoreRef, _ctx: EngineContext): Promise<void> {

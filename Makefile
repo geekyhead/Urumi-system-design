@@ -8,7 +8,7 @@ CLUSTER_NAME ?= store-platform
 PLATFORM_HOST ?= platform.127.0.0.1.nip.io
 export CLUSTER_NAME PLATFORM_HOST
 
-.PHONY: help setup deploy test clean lint build status logs backup upgrade-stores rollback
+.PHONY: help setup deploy test clean lint build status logs tokens backup upgrade-stores rollback
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
@@ -43,6 +43,10 @@ status: ## Show platform and store namespaces
 
 logs: ## Tail orchestrator API logs
 	kubectl logs -n store-platform deploy/store-platform-api -f
+
+tokens: ## Print dashboard/API sign-in tokens
+	@kubectl get secret -n store-platform store-platform-auth -o jsonpath='{.data.users\.json}' | base64 -d \
+		| jq -r '.[] | "\(.name)\t\(.role)\tmax \(.maxStores) stores\t\(.token)"'
 
 backup: ## Back up one store: make backup STORE=<id>
 	./scripts/store-backup.sh $(STORE)

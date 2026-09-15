@@ -1,4 +1,4 @@
-import { ExternalLink, Settings2, Store as StoreIcon, Trash2 } from 'lucide-react';
+import { ExternalLink, Globe, Settings2, Store as StoreIcon, Trash2 } from 'lucide-react';
 import { localTime, relativeTime } from '../format';
 import type { EngineType, Store } from '../types';
 import { StatusBadge } from './StatusBadge';
@@ -9,6 +9,8 @@ interface Props {
   now: number;
   onDelete: (store: Store) => void;
   onCreate: () => void;
+  onDomains: (store: Store) => void;
+  showOwner: boolean;
 }
 
 const ENGINE_BADGE: Record<EngineType, { label: string; className: string }> = {
@@ -16,7 +18,7 @@ const ENGINE_BADGE: Record<EngineType, { label: string; className: string }> = {
   medusa: { label: 'MedusaJS', className: 'bg-sky-500/10 text-sky-300 ring-sky-500/30' },
 };
 
-export function StoreList({ stores, loading, now, onDelete, onCreate }: Props) {
+export function StoreList({ stores, loading, now, onDelete, onCreate, onDomains, showOwner }: Props) {
   if (loading && stores.length === 0) {
     return (
       <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-12 text-center text-sm text-slate-400">
@@ -64,6 +66,9 @@ export function StoreList({ stores, loading, now, onDelete, onCreate }: Props) {
                   <div className="mt-0.5 font-mono text-xs text-slate-500">
                     {store.id} · {store.namespace}
                   </div>
+                  {showOwner && (
+                    <div className="mt-0.5 text-xs text-slate-500">owner: {store.owner ?? 'unassigned (created before sign-in)'}</div>
+                  )}
                   {ready && (
                     <a
                       href={store.urls.storefront}
@@ -85,6 +90,18 @@ export function StoreList({ stores, loading, now, onDelete, onCreate }: Props) {
                       {store.urls.alternateStorefront.replace(/^https?:\/\//, '')}
                     </a>
                   )}
+                  {store.urls.custom.map((url) => (
+                    <a
+                      key={url}
+                      href={url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-0.5 flex items-center gap-1 truncate font-mono text-xs text-emerald-300 hover:underline"
+                    >
+                      <Globe className="h-3 w-3 shrink-0" aria-hidden />
+                      {url.replace(/^https?:\/\//, '')}
+                    </a>
+                  ))}
                 </td>
                 <td className="px-4 py-3">
                   <span className={`rounded-md px-2 py-0.5 text-xs font-medium ring-1 ring-inset ${engine.className}`}>
@@ -130,6 +147,16 @@ export function StoreList({ stores, loading, now, onDelete, onCreate }: Props) {
                       <Settings2 className="h-4 w-4" aria-hidden />
                       Admin
                     </a>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      onClick={() => onDomains(store)}
+                      disabled={!ready}
+                      aria-label={`Custom domains for ${store.name}`}
+                    >
+                      <Globe className="h-4 w-4" aria-hidden />
+                      Domains
+                    </button>
                     <button
                       type="button"
                       className="btn-ghost-danger"

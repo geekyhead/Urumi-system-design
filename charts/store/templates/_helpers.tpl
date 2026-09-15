@@ -18,6 +18,9 @@ store-{{ include "store.id" . }}.{{ .Values.global.baseDomain }}
 {{- range .Values.global.aliasDomains -}}
 {{- $hosts = append $hosts (printf "store-%s.%s" $id .) -}}
 {{- end -}}
+{{- range (.Values.global.customDomains | default list) -}}
+{{- $hosts = append $hosts (lower .) -}}
+{{- end -}}
 {{- toJson $hosts -}}
 {{- end -}}
 

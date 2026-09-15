@@ -11,6 +11,8 @@ global:
   ingressClassName: nginx
   # Additional domains the store answers on (store-<id>.<alias>), e.g. localhost.
   aliasDomains: []
+  # Customer-owned domains attached from the dashboard (A/CNAME to the ingress).
+  customDomains: []
   # Namespace running the ingress controller; allowed through the NetworkPolicy.
   ingressNamespace: ingress-nginx
 

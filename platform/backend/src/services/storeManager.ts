@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import dns from 'node:dns/promises';
 import type { V1Namespace } from '@kubernetes/client-node';
 import type { FastifyBaseLogger } from 'fastify';
 import {
@@ -13,6 +14,7 @@ import type { Config } from '../config.js';
 import { EngineUnavailableError, type EngineRegistry, type EngineStoreRef } from '../engines/index.js';
 import {
   HttpError,
+  type DomainCheck,
   type EngineType,
   type PlatformInfo,
   type StoreDetail,
@@ -20,13 +22,14 @@ import {
   type StoreStatus,
 } from '../types.js';
 import type { AuditLog } from './audit.js';
-import type { PlatformMetrics } from './metrics.js';
+import type { AuthUser } from './auth.js';
 import { HelmError, type HelmClient } from './helm.js';
 import {
   ANNOTATION_ACCENT_COLOR,
   ANNOTATION_CATALOG,
   ANNOTATION_CATALOG_SPEC,
   ANNOTATION_CREATED_AT,
+  ANNOTATION_CUSTOM_DOMAINS,
   ANNOTATION_IDEMPOTENCY,
   ANNOTATION_NAME,
   ANNOTATION_READY_AT,
@@ -34,12 +37,15 @@ import {
   ANNOTATION_STATUS,
   LABEL_ENGINE,
   LABEL_MANAGED,
+  LABEL_OWNER,
   LABEL_STORE_ID,
   STORE_NAMESPACE_PREFIX,
   isApiError,
   namespaceFor,
   type KubernetesClient,
 } from './k8s.js';
+import type { LeaderElector } from './leader.js';
+import type { PlatformMetrics } from './metrics.js';
 
 export interface CreateStoreInput {
   name: string;
@@ -48,10 +54,12 @@ export interface CreateStoreInput {
   sells?: string;
   products?: CustomProductInput[];
   idempotencyKey?: string;
+  owner: AuthUser;
   actor: string;
 }
 
 const STORE_ID_LENGTH = 8;
+const DOMAIN_PATTERN = /^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 
 /** Serialises async critical sections within this process. */
 class Mutex {
@@ -97,6 +105,9 @@ class Semaphore {
  * annotations, so the orchestrator is stateless and can crash or restart at
  * any point and resume from the reconciler.
  *
+ * Any replica accepts API requests and writes intent (namespace, annotations).
+ * Only the lease-holding replica provisions, tears down and reconciles.
+ *
  *   (create) -> Provisioning -> Ready
  *                    |  ^
  *                    v  | (recovers)
@@ -114,6 +125,7 @@ export class StoreManager {
   private kubernetesReachable = false;
   private cachedStores: StoreRecord[] | null = null;
   private metrics: PlatformMetrics | null = null;
+  private leader: LeaderElector | null = null;
 
   constructor(
     private readonly config: Config,
@@ -127,24 +139,51 @@ export class StoreManager {
   }
 
   // ---------------------------------------------------------------------------
+  // Wiring
+
+  setMetrics(metrics: PlatformMetrics): void {
+    this.metrics = metrics;
+  }
+
+  setLeader(leader: LeaderElector): void {
+    this.leader = leader;
+  }
+
+  get isLeader(): boolean {
+    return this.leader ? this.leader.isLeader : true;
+  }
+
+  get isKubernetesReachable(): boolean {
+    return this.kubernetesReachable;
+  }
+
+  /** Stores seen by the last reconcile pass (cheap, no API call); null before the first pass. */
+  get lastKnownStores(): StoreRecord[] | null {
+    return this.cachedStores;
+  }
+
+  // ---------------------------------------------------------------------------
   // Queries
 
-  async list(): Promise<StoreRecord[]> {
+  async list(viewer?: AuthUser): Promise<StoreRecord[]> {
     const namespaces = await this.k8s.listStoreNamespaces();
     return namespaces
-      .map((ns) => this.toStore(ns))
-      .filter((s): s is { record: StoreRecord; ref: EngineStoreRef } => s !== null)
-      .map((s) => s.record)
+      .map((ns) => this.toStore(ns)?.record)
+      .filter((record): record is StoreRecord => Boolean(record))
+      .filter((record) => !viewer || canAccess(record, viewer))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
-  async get(id: string): Promise<StoreDetail> {
-    assertValidId(id);
-    const ns = await this.k8s.getNamespace(namespaceFor(id));
-    const store = ns ? this.toStore(ns) : null;
-    if (!store) throw new HttpError(404, 'STORE_NOT_FOUND', `Store ${id} not found`);
+  async get(id: string, viewer: AuthUser): Promise<StoreDetail> {
+    const store = await this.findAccessible(id, viewer);
     const engine = this.engines.get(store.record.engine);
-    const snapshot = await this.k8s.snapshot(store.record.namespace, engine.releaseName(store.ref));
+    // A brand-new namespace can briefly lack the tenant RoleBinding; report empty health instead of failing.
+    const snapshot = await this.k8s
+      .snapshot(store.record.namespace, engine.releaseName(store.ref))
+      .catch((err: unknown) => {
+        if (isApiError(err, 403)) return { pods: [], jobs: [], helmReleasePresent: false };
+        throw err;
+      });
     return {
       ...store.record,
       products: store.ref.catalog.products.map((p) => ({ name: p.name, category: p.category, price: p.price })),
@@ -152,14 +191,25 @@ export class StoreManager {
     };
   }
 
-  async platformInfo(): Promise<PlatformInfo> {
+  async platformInfo(viewer: AuthUser): Promise<PlatformInfo> {
     const stores = await this.list().catch(() => null);
     const reachable = stores !== null;
+    const active = (stores ?? []).filter((s) => s.status !== 'Deleting');
     return {
       status: reachable ? 'ok' : 'degraded',
       kubernetesReachable: reachable,
       lastReconcileAt: this.lastReconcileAt,
-      quota: { used: stores ? stores.filter((s) => s.status !== 'Deleting').length : 0, max: this.config.maxStores },
+      quota: { used: active.length, max: this.config.maxStores },
+      userQuota: { used: active.filter((s) => s.owner === viewer.name).length, max: viewer.maxStores },
+      user: viewer,
+      authEnabled: this.config.authEnabled,
+      orchestrator: {
+        instance: this.config.podName,
+        leader: this.leader ? this.leader.currentHolder : this.config.podName,
+        leaderElection: Boolean(this.leader),
+        auditBackend: this.audit.backend,
+      },
+      ingress: { address: this.config.publicIngressAddress, hostname: this.config.publicIngressHostname || null },
       engines: this.engines.list().map((e) => ({
         type: e.type,
         displayName: e.displayName,
@@ -176,17 +226,33 @@ export class StoreManager {
     return resolveCatalog(spec, name.trim() || 'My Store', `preview-${name}`);
   }
 
-  get isKubernetesReachable(): boolean {
-    return this.kubernetesReachable;
-  }
-
-  /** Stores seen by the last reconcile pass (cheap, no API call); null before the first pass. */
-  get lastKnownStores(): StoreRecord[] | null {
-    return this.cachedStores;
-  }
-
-  setMetrics(metrics: PlatformMetrics): void {
-    this.metrics = metrics;
+  async checkDomains(id: string, viewer: AuthUser): Promise<DomainCheck[]> {
+    const store = await this.findAccessible(id, viewer);
+    const expectedAddress = this.config.publicIngressAddress;
+    const expectedHost = this.config.publicIngressHostname.toLowerCase();
+    return Promise.all(
+      store.record.customDomains.map(async (domain): Promise<DomainCheck> => {
+        const resolvesTo: string[] = [];
+        let error: string | null = null;
+        try {
+          resolvesTo.push(...(await dns.lookup(domain, { all: true })).map((r) => r.address));
+        } catch (err) {
+          error = (err as NodeJS.ErrnoException).code ?? (err as Error).message;
+        }
+        let cname: string[] = [];
+        if (expectedHost) cname = await dns.resolveCname(domain).catch(() => []);
+        const ok =
+          (Boolean(expectedAddress) && resolvesTo.includes(expectedAddress)) ||
+          (Boolean(expectedHost) && cname.some((c) => c.toLowerCase().replace(/\.$/, '') === expectedHost));
+        return {
+          domain,
+          ok,
+          resolvesTo: [...resolvesTo, ...cname.map((c) => `CNAME ${c}`)],
+          expected: expectedHost ? `A ${expectedAddress} or CNAME ${expectedHost}` : `A ${expectedAddress}`,
+          error: ok ? null : error,
+        };
+      }),
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -203,83 +269,105 @@ export class StoreManager {
       throw new HttpError(501, 'ENGINE_NOT_AVAILABLE', `${engine.displayName} engine is not available yet`);
     }
 
-    const keyHash = input.idempotencyKey ? sha256(input.idempotencyKey) : null;
-    // Deterministic id per idempotency key: concurrent retries, even across
+    const keyHash = input.idempotencyKey ? sha256(`${input.owner.name}:${input.idempotencyKey}`) : null;
+    // Deterministic id per (user, idempotency key): concurrent retries, even across
     // replicas, race on the same namespace name and Kubernetes lets only one win.
     const id = keyHash ? keyHash.slice(0, STORE_ID_LENGTH) : randomId();
     const namespace = namespaceFor(id);
 
-    return this.createLock.run(async () => {
-      const existing = await this.k8s.getNamespace(namespace);
-      if (existing) return this.replay(existing, input, keyHash);
+    // The global lock (Postgres advisory lock when shared) makes the quota check
+    // and namespace creation atomic across every API replica.
+    return this.audit.withGlobalLock(() =>
+      this.createLock.run(async () => {
+        const existing = await this.k8s.getNamespace(namespace);
+        if (existing) return this.replay(existing, input, keyHash);
 
-      const stores = await this.list();
-      const active = stores.filter((s) => s.status !== 'Deleting').length;
-      if (active >= this.config.maxStores) {
-        this.audit.record('STORE_CREATE_REJECTED', {
+        const stores = await this.list();
+        const active = stores.filter((s) => s.status !== 'Deleting');
+        if (active.length >= this.config.maxStores) {
+          this.reject(input, `store quota reached (${active.length}/${this.config.maxStores})`, { active: active.length });
+          throw new HttpError(429, 'STORE_QUOTA_EXCEEDED', `Platform store limit reached (${this.config.maxStores})`);
+        }
+        const owned = active.filter((s) => s.owner === input.owner.name).length;
+        if (owned >= input.owner.maxStores) {
+          this.reject(input, `user ${input.owner.name} reached their store limit (${owned}/${input.owner.maxStores})`, {
+            owned,
+            max: input.owner.maxStores,
+          });
+          throw new HttpError(429, 'USER_QUOTA_EXCEEDED', `You have reached your store limit (${input.owner.maxStores})`);
+        }
+
+        const spec: CatalogSpec = {
+          type: input.catalog ?? 'auto',
+          ...(input.sells ? { sells: input.sells } : {}),
+          ...(input.products?.length ? { products: input.products } : {}),
+        };
+        const catalog = resolveCatalog(spec, input.name, id);
+        const createdAt = new Date().toISOString();
+        let created: V1Namespace;
+        try {
+          created = await this.k8s.createNamespace({
+            metadata: {
+              name: namespace,
+              labels: {
+                [LABEL_MANAGED]: 'true',
+                [LABEL_STORE_ID]: id,
+                [LABEL_ENGINE]: input.engine,
+                [LABEL_OWNER]: input.owner.name,
+                'pod-security.kubernetes.io/enforce': 'baseline',
+                'pod-security.kubernetes.io/warn': 'restricted',
+              },
+              annotations: {
+                [ANNOTATION_NAME]: input.name,
+                [ANNOTATION_STATUS]: 'Provisioning',
+                [ANNOTATION_CREATED_AT]: createdAt,
+                [ANNOTATION_CATALOG]: catalog.type,
+                [ANNOTATION_CATALOG_SPEC]: JSON.stringify(spec),
+                [ANNOTATION_ACCENT_COLOR]: accentColorFor(id),
+                ...(keyHash ? { [ANNOTATION_IDEMPOTENCY]: keyHash } : {}),
+              },
+            },
+          });
+        } catch (err) {
+          if (isApiError(err, 409)) {
+            const winner = await this.k8s.getNamespace(namespace);
+            if (winner) return this.replay(winner, input, keyHash);
+          }
+          throw err;
+        }
+
+        const store = this.toStore(created);
+        if (!store) throw new Error(`Namespace ${namespace} created without store metadata`);
+        // Grant the tenant role right away (on whichever replica took the request) so
+        // status reads work before the leader starts the install.
+        await this.k8s.ensureTenantRoleBinding(
+          namespace,
+          this.config.tenantClusterRole,
+          this.config.platformNamespace,
+          this.config.serviceAccountName,
+        );
+        this.audit.record('STORE_CREATE_REQUESTED', {
+          storeId: id,
           actor: input.actor,
-          message: `Rejected "${input.name}": store quota reached (${active}/${this.config.maxStores})`,
-          details: { active, max: this.config.maxStores },
-        });
-        throw new HttpError(429, 'STORE_QUOTA_EXCEEDED', `Store limit reached (${this.config.maxStores})`);
-      }
-
-      const spec: CatalogSpec = {
-        type: input.catalog ?? 'auto',
-        ...(input.sells ? { sells: input.sells } : {}),
-        ...(input.products?.length ? { products: input.products } : {}),
-      };
-      const catalog = resolveCatalog(spec, input.name, id);
-      const createdAt = new Date().toISOString();
-      let created: V1Namespace;
-      try {
-        created = await this.k8s.createNamespace({
-          metadata: {
-            name: namespace,
-            labels: {
-              [LABEL_MANAGED]: 'true',
-              [LABEL_STORE_ID]: id,
-              [LABEL_ENGINE]: input.engine,
-              'pod-security.kubernetes.io/enforce': 'baseline',
-              'pod-security.kubernetes.io/warn': 'restricted',
-            },
-            annotations: {
-              [ANNOTATION_NAME]: input.name,
-              [ANNOTATION_STATUS]: 'Provisioning',
-              [ANNOTATION_CREATED_AT]: createdAt,
-              [ANNOTATION_CATALOG]: catalog.type,
-              [ANNOTATION_CATALOG_SPEC]: JSON.stringify(spec),
-              [ANNOTATION_ACCENT_COLOR]: accentColorFor(id),
-              ...(keyHash ? { [ANNOTATION_IDEMPOTENCY]: keyHash } : {}),
-            },
+          message: `Store "${input.name}" requested by ${input.owner.name} (${engine.displayName}, ${catalog.label}, ${catalog.products.length} products)`,
+          details: {
+            engine: input.engine,
+            owner: input.owner.name,
+            catalog: catalog.type,
+            sells: input.sells ?? null,
+            namespace,
+            idempotent: Boolean(keyHash),
           },
         });
-      } catch (err) {
-        if (isApiError(err, 409)) {
-          const winner = await this.k8s.getNamespace(namespace);
-          if (winner) return this.replay(winner, input, keyHash);
-        }
-        throw err;
-      }
-
-      const store = this.toStore(created);
-      if (!store) throw new Error(`Namespace ${namespace} created without store metadata`);
-      this.audit.record('STORE_CREATE_REQUESTED', {
-        storeId: id,
-        actor: input.actor,
-        message: `Store "${input.name}" requested (${engine.displayName}, ${catalog.label}, ${catalog.products.length} products)`,
-        details: { engine: input.engine, catalog: catalog.type, sells: input.sells ?? null, namespace, idempotent: Boolean(keyHash) },
-      });
-      this.startProvision(store.record, 'STORE_PROVISIONING_STARTED');
-      return { store: store.record, created: true };
-    });
+        // Non-leaders only record intent; the leader's reconciler starts the install within one interval.
+        if (this.isLeader) this.startProvision(store.record, 'STORE_PROVISIONING_STARTED');
+        return { store: store.record, created: true };
+      }),
+    );
   }
 
-  async delete(id: string, actor: string): Promise<StoreRecord> {
-    assertValidId(id);
-    const ns = await this.k8s.getNamespace(namespaceFor(id));
-    const store = ns ? this.toStore(ns) : null;
-    if (!store) throw new HttpError(404, 'STORE_NOT_FOUND', `Store ${id} not found`);
+  async delete(id: string, actor: string, viewer: AuthUser): Promise<StoreRecord> {
+    const store = await this.findAccessible(id, viewer);
     const record = store.record;
 
     if (record.status !== 'Deleting') {
@@ -290,31 +378,76 @@ export class StoreManager {
       this.audit.record('STORE_DELETE_REQUESTED', {
         storeId: id,
         actor,
-        message: `Deletion of "${record.name}" requested`,
-        details: { previousStatus: record.status },
+        message: `Deletion of "${record.name}" requested by ${viewer.name}`,
+        details: { previousStatus: record.status, owner: record.owner },
       });
     }
     const deleting = { ...record, status: 'Deleting' as const, reason: null };
-    this.startTeardown(deleting, store.ref);
+    if (this.isLeader) this.startTeardown(deleting, store.ref);
     return deleting;
   }
 
+  /** Attaches customer domains to a store: validates, updates the Ingress through Helm, audits. */
+  async setDomains(id: string, requested: string[], actor: string, viewer: AuthUser): Promise<StoreRecord> {
+    const store = await this.findAccessible(id, viewer);
+    if (store.record.status !== 'Ready') {
+      throw new HttpError(409, 'STORE_NOT_READY', 'Domains can only be changed on a Ready store');
+    }
+    const domains = [...new Set(requested.map((d) => d.trim().toLowerCase().replace(/\.$/, '')).filter(Boolean))];
+    if (domains.length > this.config.maxCustomDomains) {
+      throw new HttpError(400, 'TOO_MANY_DOMAINS', `At most ${this.config.maxCustomDomains} custom domains per store`);
+    }
+    const reserved = [this.config.baseDomain, ...this.config.storeAliasDomains, 'localhost'];
+    for (const domain of domains) {
+      if (!DOMAIN_PATTERN.test(domain)) {
+        throw new HttpError(400, 'INVALID_DOMAIN', `"${domain}" is not a valid domain name`);
+      }
+      if (reserved.some((r) => domain === r || domain.endsWith(`.${r}`))) {
+        throw new HttpError(400, 'RESERVED_DOMAIN', `"${domain}" is under a platform domain and cannot be attached`);
+      }
+    }
+
+    return this.audit.withGlobalLock(async () => {
+      const others = (await this.list()).filter((s) => s.id !== id);
+      const taken = domains.find((d) => others.some((s) => s.customDomains.includes(d)));
+      if (taken) throw new HttpError(409, 'DOMAIN_IN_USE', `"${taken}" is already attached to another store`);
+
+      const previous = store.record.customDomains;
+      const engine = this.engines.get(store.record.engine);
+      await this.k8s.patchNamespaceAnnotations(store.record.namespace, {
+        [ANNOTATION_CUSTOM_DOMAINS]: domains.length ? JSON.stringify(domains) : null,
+      });
+      try {
+        await this.k8s.ensureTenantRoleBinding(
+          store.record.namespace,
+          this.config.tenantClusterRole,
+          this.config.platformNamespace,
+          this.config.serviceAccountName,
+        );
+        await engine.provision({ ...store.ref, customDomains: domains }, { helm: this.helm, config: this.config });
+      } catch (err) {
+        await this.k8s.patchNamespaceAnnotations(store.record.namespace, {
+          [ANNOTATION_CUSTOM_DOMAINS]: previous.length ? JSON.stringify(previous) : null,
+        });
+        throw new HttpError(502, 'DOMAIN_UPDATE_FAILED', `Could not update the store ingress: ${errorMessage(err)}`);
+      }
+
+      this.audit.record('STORE_DOMAINS_UPDATED', {
+        storeId: id,
+        actor,
+        message: domains.length
+          ? `Domains for "${store.record.name}" set to ${domains.join(', ')}`
+          : `Custom domains removed from "${store.record.name}"`,
+        details: { previous, domains },
+      });
+      const ns = await this.k8s.getNamespace(store.record.namespace);
+      const updated = ns ? this.toStore(ns)?.record : null;
+      return updated ?? { ...store.record, customDomains: domains };
+    });
+  }
+
   // ---------------------------------------------------------------------------
-  // Background work
-
-  private refFor(store: StoreRecord, ns: V1Namespace | null): EngineStoreRef {
-    return ns ? (this.toStore(ns)?.ref ?? this.fallbackRef(store)) : this.fallbackRef(store);
-  }
-
-  private fallbackRef(store: StoreRecord): EngineStoreRef {
-    return {
-      id: store.id,
-      name: store.name,
-      namespace: store.namespace,
-      accentColor: store.accentColor,
-      catalog: resolveCatalog({ type: store.catalog }, store.name, store.id),
-    };
-  }
+  // Background work (leader only)
 
   private startProvision(store: StoreRecord, action: 'STORE_PROVISIONING_STARTED' | 'STORE_PROVISIONING_RESUMED'): void {
     if (this.inflightProvisions.has(store.id)) return;
@@ -326,7 +459,8 @@ export class StoreManager {
         if (!ns || ns.metadata?.annotations?.[ANNOTATION_STATUS] === 'Deleting' || ns.status?.phase === 'Terminating') {
           return;
         }
-        const ref = this.refFor(store, ns);
+        const ref = this.toStore(ns)?.ref;
+        if (!ref) return;
         await this.k8s.ensureTenantRoleBinding(
           store.namespace,
           this.config.tenantClusterRole,
@@ -336,8 +470,8 @@ export class StoreManager {
         await engine.provision(ref, { helm: this.helm, config: this.config });
         this.audit.record(action, {
           storeId: store.id,
-          message: `Helm release ${engine.releaseName(ref)} applied; waiting for workloads`,
-          details: { namespace: store.namespace },
+          message: `Helm release ${engine.releaseName(ref)} applied by ${this.config.podName}; waiting for workloads`,
+          details: { namespace: store.namespace, instance: this.config.podName },
         });
       })
       .catch(async (err: unknown) => {
@@ -361,6 +495,8 @@ export class StoreManager {
       try {
         const ns = await this.k8s.getNamespace(store.namespace);
         if (ns && ns.status?.phase !== 'Terminating') {
+          // helm uninstall reads release Secrets, which needs the tenant RoleBinding.
+          await this.ensureAccess(store.namespace);
           await engine.deprovision(ref, { helm: this.helm, config: this.config });
         }
         await this.k8s.deleteNamespace(store.namespace);
@@ -411,16 +547,17 @@ export class StoreManager {
     await Promise.allSettled([...this.inflightProvisions.values(), ...this.inflightDeletions.values()]);
   }
 
-  /** One pass of the control loop over every managed namespace. */
+  /** One pass of the control loop. Every replica refreshes its cache; only the leader acts. */
   async reconcile(): Promise<void> {
     const namespaces = await this.k8s.listStoreNamespaces();
-    this.cachedStores = namespaces
-      .map((ns) => this.toStore(ns)?.record)
-      .filter((record): record is StoreRecord => Boolean(record));
+    const stores = namespaces
+      .map((ns) => ({ ns, store: this.toStore(ns) }))
+      .filter((entry): entry is { ns: V1Namespace; store: { record: StoreRecord; ref: EngineStoreRef } } => Boolean(entry.store));
+    this.cachedStores = stores.map((entry) => entry.store.record);
+    if (!this.isLeader) return;
+
     await Promise.all(
-      namespaces.map(async (ns) => {
-        const store = this.toStore(ns);
-        if (!store) return;
+      stores.map(async ({ ns, store }) => {
         try {
           await this.reconcileStore(store.record, store.ref, ns);
         } catch (err) {
@@ -432,21 +569,24 @@ export class StoreManager {
 
   private async reconcileStore(store: StoreRecord, ref: EngineStoreRef, ns: V1Namespace): Promise<void> {
     if (store.status === 'Deleting' || ns.status?.phase === 'Terminating') {
-      // Resume teardown after a crash, or finish a delete issued out of band.
+      // Resume teardown after a crash or leader change, or finish a delete issued by another replica.
       this.startTeardown({ ...store, status: 'Deleting' }, ref);
       return;
     }
     if (store.status === 'Ready' || this.inflightProvisions.has(store.id)) return;
 
+    // Self-heal: stores accepted before their RoleBinding existed (or whose binding
+    // was removed) would otherwise fail every snapshot with 403 and never progress.
+    await this.ensureAccess(store.namespace);
     const engine = this.engines.get(store.engine);
     const snapshot = await this.k8s.snapshot(store.namespace, engine.releaseName(ref));
 
     if (store.status === 'Provisioning' && !snapshot.helmReleasePresent) {
-      // Orchestrator died between namespace creation and helm install.
       if (this.ageSeconds(store) > this.config.provisionTimeoutSeconds) {
         await this.transition(store, 'Failed', 'Provisioning timed out before the Helm release was created');
       } else {
-        this.startProvision(store, 'STORE_PROVISIONING_RESUMED');
+        // Fresh stores accepted by another replica, or installs interrupted by a crash.
+        this.startProvision(store, this.ageSeconds(store) < 60 ? 'STORE_PROVISIONING_STARTED' : 'STORE_PROVISIONING_RESUMED');
       }
       return;
     }
@@ -512,10 +652,36 @@ export class StoreManager {
   // ---------------------------------------------------------------------------
   // Mapping
 
+  private async findAccessible(id: string, viewer: AuthUser): Promise<{ record: StoreRecord; ref: EngineStoreRef }> {
+    assertValidId(id);
+    const ns = await this.k8s.getNamespace(namespaceFor(id));
+    const store = ns ? this.toStore(ns) : null;
+    // Stores owned by someone else look exactly like missing stores.
+    if (!store || !canAccess(store.record, viewer)) throw new HttpError(404, 'STORE_NOT_FOUND', `Store ${id} not found`);
+    return store;
+  }
+
+  private ensureAccess(namespace: string): Promise<void> {
+    return this.k8s.ensureTenantRoleBinding(
+      namespace,
+      this.config.tenantClusterRole,
+      this.config.platformNamespace,
+      this.config.serviceAccountName,
+    );
+  }
+
+  private reject(input: CreateStoreInput, why: string, details: Record<string, unknown>): void {
+    this.audit.record('STORE_CREATE_REJECTED', {
+      actor: input.actor,
+      message: `Rejected "${input.name}": ${why}`,
+      details: { ...details, owner: input.owner.name },
+    });
+  }
+
   private replay(ns: V1Namespace, input: CreateStoreInput, keyHash: string | null): { store: StoreRecord; created: boolean } {
     const store = this.toStore(ns)?.record;
     const existingHash = ns.metadata?.annotations?.[ANNOTATION_IDEMPOTENCY];
-    if (!store || !keyHash || existingHash !== keyHash) {
+    if (!store || !keyHash || existingHash !== keyHash || store.owner !== input.owner.name) {
       throw new HttpError(409, 'STORE_ID_CONFLICT', 'A store with this identifier already exists');
     }
     if (store.status === 'Deleting') {
@@ -555,15 +721,18 @@ export class StoreManager {
       namespace: name,
       catalog,
       accentColor: annotations[ANNOTATION_ACCENT_COLOR] ?? accentColorFor(id),
+      customDomains: parseDomains(annotations[ANNOTATION_CUSTOM_DOMAINS]),
     };
     const record: StoreRecord = {
       id,
       name: storeName,
       engine: engineType,
+      owner: labels[LABEL_OWNER] ?? null,
       catalog: catalog.type,
       catalogLabel: catalog.label,
       productCount: catalog.products.length,
       accentColor: ref.accentColor,
+      customDomains: ref.customDomains,
       namespace: name,
       status,
       reason: annotations[ANNOTATION_REASON] ?? null,
@@ -581,6 +750,11 @@ export class StoreManager {
   }
 }
 
+/** Admins see every store; users see stores they own. Stores from before auth have no owner and are admin-only. */
+function canAccess(record: StoreRecord, viewer: AuthUser): boolean {
+  return viewer.role === 'admin' || record.owner === viewer.name;
+}
+
 function parseSpec(raw: string | undefined, legacyType: string | undefined): CatalogSpec {
   if (raw) {
     try {
@@ -591,6 +765,16 @@ function parseSpec(raw: string | undefined, legacyType: string | undefined): Cat
     }
   }
   return { type: legacyType ?? 'auto' };
+}
+
+function parseDomains(raw: string | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((d): d is string => typeof d === 'string') : [];
+  } catch {
+    return [];
+  }
 }
 
 function assertValidId(id: string): void {
