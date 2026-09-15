@@ -20,7 +20,7 @@ flowchart LR
     subgraph platform[namespace: store-platform]
       dash[Dashboard<br/>nginx + React]
       api[Orchestrator API<br/>Fastify + helm]
-      db[(SQLite audit<br/>PVC)]
+      db[(Postgres audit<br/>StatefulSet + PVC)]
       api --- db
     end
 
@@ -54,7 +54,7 @@ ASCII version:
              │ React/nginx│ ───────► │ Fastify          │ ────► │ WP-CLI seeder Job (shared WP PVC)   │
              └────────────┘          │  ├ StoreManager  │       │ Quota · LimitRange · NetworkPolicy  │
                                      │  ├ Reconciler    │ watch │ Secret (generated credentials)      │
-                                     │  └ Audit (SQLite)│ ◄──── │ Ingress store-<id>.<domain>         │
+                                     │  └ Audit (PG)    │ ◄──── │ Ingress store-<id>.<domain>         │
                                      └─────────────────┘       └─────────────────────────────────────┘
 ```
 
@@ -131,7 +131,7 @@ Store state lives on the namespace:
 | `platform.io/created-at`, `platform.io/ready-at` | annotation | Timestamps and timeout base |
 | `platform.io/idempotency-key-sha256` | annotation | Replay detection |
 
-The orchestrator process holds no authoritative state. It can be killed at any moment and a new process continues from the cluster. Only the audit log is local (SQLite on a PVC).
+The orchestrator process holds no authoritative state. It can be killed at any moment and a new process continues from the cluster. The only other state is the audit log in the platform's Postgres StatefulSet, shared by all API replicas.
 
 ### Idempotent create
 
@@ -176,7 +176,7 @@ If teardown fails, it is audited as `STORE_DELETE_FAILED` and the reconciler ret
 ### Helm upgrade safety
 
 - The platform chart and store chart are upgraded with `helm upgrade --install`; `--history-max 5` bounds release Secrets.
-- The API Deployment uses `Recreate` because the SQLite PVC is RWO. A `checksum/config` annotation restarts it when configuration changes.
+- The API Deployment rolls with `maxUnavailable: 0`, so one replica always serves during a platform upgrade; the Lease moves to a healthy replica if the leader is replaced. (With `audit.backend=sqlite` it falls back to `Recreate`, because the SQLite PVC is RWO.) `checksum/config` and `checksum/users` annotations restart pods when configuration or users change.
 - Store upgrades (for example a new WordPress image) re-render with the looked-up Secret values and roll WordPress with `Recreate`. Data lives on PVCs and survives.
 - The seeder Job is named `store-<id>-seeder-r<revision>`. Job pod templates are immutable, so a fixed name would make every `helm upgrade` fail. Each upgrade or rollback runs a fresh, idempotent seeder that moves plugin, theme and core versions and runs database migrations. Catalog content is seeded only once, so merchant edits are kept.
 - `scripts/upgrade-stores.sh` upgrades stores one at a time: backup, `helm upgrade --reset-then-reuse-values`, wait for the seeder, smoke test, automatic `helm rollback` plus data restore on failure. See the runbook in the README.
@@ -185,7 +185,7 @@ If teardown fails, it is audited as `STORE_DELETE_FAILED` and the reconciler ret
 
 - The dashboard shows an activity drawer (audit trail) and summary cards: stores created, success rate, failures, average and p95 provisioning time, deletions.
 - `GET /metrics` exposes Prometheus metrics on the API pod only (not routed by the Ingress): store counts by status, lifecycle event totals, provisioning duration and helm operation duration histograms.
-- Totals derive from the SQLite audit log rather than in-memory counters, so they survive restarts.
+- Totals derive from the Postgres audit log rather than in-memory counters, so they survive restarts and agree across API replicas.
 - Failures carry a human-readable reason (seeder Job failure message, image pull or CrashLoopBackOff pod state, or a timeout listing what was still pending), shown in the Failed badge popover.
 
 ## 5. Security
