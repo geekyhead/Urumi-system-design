@@ -1,4 +1,12 @@
-import type { AuditEntry, CatalogPreview, CreateStoreRequest, PlatformInfo, Store, StoreDetail } from './types';
+import type {
+  AuditEntry,
+  CatalogPreview,
+  CreateStoreRequest,
+  MetricsSummary,
+  PlatformInfo,
+  Store,
+  StoreDetail,
+} from './types';
 
 export class ApiError extends Error {
   constructor(
@@ -58,4 +66,5 @@ export const api = {
     request<Store>('/api/stores', { method: 'POST', body: JSON.stringify(body) }),
   deleteStore: (id: string) => request<Store>(`/api/stores/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   listAudit: (limit = 200) => request<AuditEntry[]>(`/api/audit?limit=${limit}`),
+  metricsSummary: () => request<MetricsSummary>('/api/metrics/summary'),
 };

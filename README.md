@@ -159,6 +159,85 @@ When you run the API outside the cluster it uses your own kubeconfig identity, s
 
 ---
 
+## Upgrades and rollback
+
+Stores and the platform are Helm releases, so upgrades and rollbacks use Helm revisions. Data (MariaDB and `wp-content`) lives on PVCs that Helm never deletes on upgrade or rollback.
+
+### How a store upgrade works
+
+- Change the store chart or its values: an image tag (`wordpress.image`, `mariadb.image`), `seeder.woocommerceVersion`, `seeder.storefrontVersion` or `seeder.wordpressCoreVersion`.
+- `helm upgrade` renders a new seeder Job named `store-<id>-seeder-r<revision>`. A Job's pod template is immutable, so a fixed name would make every upgrade fail; the revision suffix replaces the old Job instead.
+- The seeder re-runs idempotently: it moves WooCommerce, Storefront and (optionally) WordPress core to the pinned versions, runs `wp core update-db` and `wp wc update`, and re-applies store settings.
+- Products, pages and menus are seeded only once (`platform_content_seeded_at` option), so an upgrade never overwrites prices or pages a merchant edited. Set `seeder.reseedContent=true` to re-apply the catalog on purpose.
+
+### Runbook
+
+```bash
+# 1. Back up one store (DB dump, wp-content, Helm values and revision) into backups/<id>/<timestamp>/
+make backup STORE=<id>
+
+# 2. Canary: upgrade one store to the current chart
+make upgrade-stores STORES="<id>"
+
+#    Pin a different plugin version for the canary only
+EXTRA_ARGS="--set seeder.woocommerceVersion=8.9.3" ./scripts/upgrade-stores.sh <id>
+
+# 3. Roll out to every WooCommerce store, one at a time
+make upgrade-stores
+
+# 4. Inspect history and roll back manually if needed
+helm history store-<id> -n store-<id>
+make rollback STORE=<id> REVISION=<n>
+make rollback STORE=<id> REVISION=<n> BACKUP=backups/<id>/<timestamp>   # also restore DB + wp-content
+```
+
+`scripts/upgrade-stores.sh` does this for each store in turn:
+
+1. Backs up the store (skip with `SKIP_BACKUP=true`).
+2. Runs `helm upgrade --reset-then-reuse-values`: new chart defaults and `values-<profile>.yaml`, while keeping per-store values such as id, name, catalog and colors.
+3. Waits for the new seeder Job and the WordPress rollout.
+4. Smoke-tests `GET /wp-json/wc/store/v1/products` through the Ingress.
+5. On any failure, rolls that store back to its previous revision, restores the backup, and stops. A bad release never reaches more than one store.
+
+When to restore the backup during a rollback: `helm rollback` restores Kubernetes objects and versions, not data. If the failed upgrade ran database migrations (a newer WooCommerce or WordPress core), pass `BACKUP=` so the database matches the older code.
+
+### Platform upgrades
+
+```bash
+make deploy                                                  # builds new image tags and runs helm upgrade --install
+helm history store-platform -n store-platform
+helm rollback store-platform <revision> -n store-platform --wait
+```
+
+The API keeps no state that a rollback could break. Store state lives in namespace annotations and the audit log on its PVC.
+
+---
+
+## Metrics
+
+| Endpoint | Exposure | Content |
+|----------|----------|---------|
+| `GET /metrics` on the API pod (port 8080) | Cluster-internal only; the Ingress does not route it. The Service has `prometheus.io/scrape` annotations. | Prometheus text format |
+| `GET /api/metrics/summary` | Through the Ingress, shown on the dashboard | JSON totals for the dashboard cards |
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `store_platform_stores` | gauge | `status`, `engine` |
+| `store_platform_stores_max` | gauge | |
+| `store_platform_lifecycle_events_total` | counter | `action` (`STORE_CREATE_REQUESTED`, `STORE_READY`, `STORE_FAILED`, `STORE_DELETED`, `STORE_CREATE_REJECTED`, …) |
+| `store_platform_provisioning_duration_seconds` | histogram | `engine`, `outcome` (`ready`, `failed`) |
+| `store_platform_helm_operation_duration_seconds` | histogram | `operation` (`upgrade`, `uninstall`), `result` |
+| `store_platform_process_*` | Node.js process metrics | |
+
+Lifetime counters come from the persistent audit log, so they survive API restarts. Provisioning-time percentiles on the dashboard use the durations recorded on `STORE_READY` events.
+
+```bash
+kubectl port-forward -n store-platform deploy/store-platform-api 8080:8080
+curl -s localhost:8080/metrics | grep '^store_platform_'
+```
+
+---
+
 ## Production VPS deployment (k3s)
 
 Target: a single VPS (4 vCPU / 8 GB is enough for about 8–10 stores) with a public IP and a domain you control.

@@ -5,6 +5,11 @@ metadata:
   labels:
     {{- include "platform.labels" . | nindent 4 }}
     app.kubernetes.io/component: api
+  annotations:
+    # Conventional scrape hints for Prometheus (kubernetes_sd service role).
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8080"
+    prometheus.io/path: /metrics
 spec:
   type: ClusterIP
   selector:

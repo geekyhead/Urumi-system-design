@@ -93,6 +93,25 @@ export class AuditLog {
     }));
   }
 
+  /** Event totals per action, for metrics. */
+  countByAction(): Record<string, number> {
+    const rows = this.db.prepare('SELECT action, COUNT(*) AS total FROM audit_log GROUP BY action').all() as unknown as Array<{
+      action: string;
+      total: number;
+    }>;
+    return Object.fromEntries(rows.map((row) => [row.action, Number(row.total)]));
+  }
+
+  /** Provisioning durations (seconds) recorded on STORE_READY events, newest first. */
+  recentProvisioningDurations(limit: number): number[] {
+    const rows = this.db
+      .prepare("SELECT details FROM audit_log WHERE action = 'STORE_READY' ORDER BY id DESC LIMIT ?")
+      .all(limit) as unknown as Array<{ details: string }>;
+    return rows
+      .map((row) => safeParse(row.details).durationSeconds)
+      .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+  }
+
   close(): void {
     this.db.close();
   }

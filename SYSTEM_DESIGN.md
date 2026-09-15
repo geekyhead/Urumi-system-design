@@ -178,6 +178,15 @@ If teardown fails, it is audited as `STORE_DELETE_FAILED` and the reconciler ret
 - The platform chart and store chart are upgraded with `helm upgrade --install`; `--history-max 5` bounds release Secrets.
 - The API Deployment uses `Recreate` because the SQLite PVC is RWO. A `checksum/config` annotation restarts it when configuration changes.
 - Store upgrades (for example a new WordPress image) re-render with the looked-up Secret values and roll WordPress with `Recreate`. Data lives on PVCs and survives.
+- The seeder Job is named `store-<id>-seeder-r<revision>`. Job pod templates are immutable, so a fixed name would make every `helm upgrade` fail. Each upgrade or rollback runs a fresh, idempotent seeder that moves plugin, theme and core versions and runs database migrations. Catalog content is seeded only once, so merchant edits are kept.
+- `scripts/upgrade-stores.sh` upgrades stores one at a time: backup, `helm upgrade --reset-then-reuse-values`, wait for the seeder, smoke test, automatic `helm rollback` plus data restore on failure. See the runbook in the README.
+
+## 4b. Observability
+
+- The dashboard shows an activity drawer (audit trail) and summary cards: stores created, success rate, failures, average and p95 provisioning time, deletions.
+- `GET /metrics` exposes Prometheus metrics on the API pod only (not routed by the Ingress): store counts by status, lifecycle event totals, provisioning duration and helm operation duration histograms.
+- Totals derive from the SQLite audit log rather than in-memory counters, so they survive restarts.
+- Failures carry a human-readable reason (seeder Job failure message, image pull or CrashLoopBackOff pod state, or a timeout listing what was still pending), shown in the Failed badge popover.
 
 ## 5. Security
 

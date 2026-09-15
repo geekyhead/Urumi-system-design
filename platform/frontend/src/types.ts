@@ -64,6 +64,18 @@ export interface PlatformInfo {
   baseDomain: string;
 }
 
+export interface MetricsSummary {
+  stores: { total: number; byStatus: Record<string, number>; max: number };
+  lifetime: { created: number; ready: number; failed: number; deleted: number; rejected: number };
+  provisioning: {
+    samples: number;
+    averageSeconds: number | null;
+    p50Seconds: number | null;
+    p95Seconds: number | null;
+    lastSeconds: number | null;
+  };
+}
+
 export interface CustomProduct {
   name: string;
   price: number;

@@ -30,10 +30,13 @@ export interface UpgradeInstallOptions {
   wait?: boolean;
 }
 
+export type HelmObserver = (operation: string, result: 'success' | 'error', seconds: number) => void;
+
 export class HelmClient {
   constructor(
     private readonly binary: string,
     private readonly commandTimeoutMs = 10 * 60 * 1000,
+    private readonly observe: HelmObserver = () => {},
   ) {}
 
   /** Idempotent install: running it twice converges to the same release. */
@@ -77,7 +80,20 @@ export class HelmClient {
     return (await this.run(['version', '--short'])).trim();
   }
 
-  private run(args: string[]): Promise<string> {
+  private async run(args: string[]): Promise<string> {
+    const started = process.hrtime.bigint();
+    const operation = args[0] ?? 'unknown';
+    try {
+      const output = await this.exec(args);
+      this.observe(operation, 'success', Number(process.hrtime.bigint() - started) / 1e9);
+      return output;
+    } catch (err) {
+      this.observe(operation, 'error', Number(process.hrtime.bigint() - started) / 1e9);
+      throw err;
+    }
+  }
+
+  private exec(args: string[]): Promise<string> {
     return new Promise((resolve, reject) => {
       const child = spawn(this.binary, args, { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
       let stdout = '';

@@ -20,6 +20,7 @@ import {
   type StoreStatus,
 } from '../types.js';
 import type { AuditLog } from './audit.js';
+import type { PlatformMetrics } from './metrics.js';
 import { HelmError, type HelmClient } from './helm.js';
 import {
   ANNOTATION_ACCENT_COLOR,
@@ -111,6 +112,8 @@ export class StoreManager {
   private reconciling = false;
   private lastReconcileAt: string | null = null;
   private kubernetesReachable = false;
+  private cachedStores: StoreRecord[] | null = null;
+  private metrics: PlatformMetrics | null = null;
 
   constructor(
     private readonly config: Config,
@@ -175,6 +178,15 @@ export class StoreManager {
 
   get isKubernetesReachable(): boolean {
     return this.kubernetesReachable;
+  }
+
+  /** Stores seen by the last reconcile pass (cheap, no API call); null before the first pass. */
+  get lastKnownStores(): StoreRecord[] | null {
+    return this.cachedStores;
+  }
+
+  setMetrics(metrics: PlatformMetrics): void {
+    this.metrics = metrics;
   }
 
   // ---------------------------------------------------------------------------
@@ -402,6 +414,9 @@ export class StoreManager {
   /** One pass of the control loop over every managed namespace. */
   async reconcile(): Promise<void> {
     const namespaces = await this.k8s.listStoreNamespaces();
+    this.cachedStores = namespaces
+      .map((ns) => this.toStore(ns)?.record)
+      .filter((record): record is StoreRecord => Boolean(record));
     await Promise.all(
       namespaces.map(async (ns) => {
         const store = this.toStore(ns);
@@ -471,17 +486,25 @@ export class StoreManager {
     if (status === 'Ready') annotations[ANNOTATION_READY_AT] = new Date().toISOString();
     await this.k8s.patchNamespaceAnnotations(store.namespace, annotations);
 
+    const seconds = this.ageSeconds(store);
     if (status === 'Ready') {
       const recovered = current.status === 'Failed';
+      if (!recovered) this.metrics?.observeProvisioning(store.engine, 'ready', seconds);
       this.audit.record(recovered ? 'STORE_RECOVERED' : 'STORE_READY', {
         storeId: store.id,
         message: recovered
           ? `Store "${store.name}" recovered and is Ready`
-          : `Store "${store.name}" is Ready after ${this.ageSeconds(store)}s`,
-        details: { urls: store.urls },
+          : `Store "${store.name}" is Ready after ${seconds}s`,
+        // durationSeconds feeds the provisioning-time metrics; recoveries would skew it.
+        details: recovered ? { urls: store.urls } : { urls: store.urls, durationSeconds: seconds },
       });
     } else if (status === 'Failed') {
-      this.audit.record('STORE_FAILED', { storeId: store.id, message: `Store "${store.name}" failed: ${reason}` });
+      if (current.status === 'Provisioning') this.metrics?.observeProvisioning(store.engine, 'failed', seconds);
+      this.audit.record('STORE_FAILED', {
+        storeId: store.id,
+        message: `Store "${store.name}" failed: ${reason}`,
+        details: { afterSeconds: seconds },
+      });
     }
     this.log.info({ storeId: store.id, from: current.status, to: status, reason }, 'store status transition');
   }

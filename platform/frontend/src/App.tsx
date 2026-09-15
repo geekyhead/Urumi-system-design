@@ -3,14 +3,16 @@ import { useCallback, useEffect, useState } from 'react';
 import { ApiError, api } from './api';
 import { AuditLogView } from './components/AuditLogView';
 import { CreateStoreModal } from './components/CreateStoreModal';
+import { MetricsBar } from './components/MetricsBar';
 import { StoreList } from './components/StoreList';
-import type { PlatformInfo, Store } from './types';
+import type { MetricsSummary, PlatformInfo, Store } from './types';
 
 const POLL_INTERVAL_MS = 5000;
 
 export default function App() {
   const [stores, setStores] = useState<Store[]>([]);
   const [platform, setPlatform] = useState<PlatformInfo | null>(null);
+  const [metrics, setMetrics] = useState<MetricsSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
@@ -26,6 +28,7 @@ export default function App() {
       setStores(storeList);
       setPlatform(info);
       setLoadError(null);
+      api.metricsSummary().then(setMetrics, () => undefined);
     } catch (err) {
       setLoadError(err instanceof ApiError ? err.message : 'Failed to load stores');
       setPlatform((prev) => (prev ? { ...prev, status: 'degraded' } : prev));
@@ -110,6 +113,7 @@ export default function App() {
       </header>
 
       <main className="mx-auto max-w-6xl px-6 py-8">
+        <MetricsBar metrics={metrics} />
         <div className="mb-4 flex flex-wrap items-center gap-4 text-sm text-slate-400">
           <span className="flex items-center gap-1.5">
             <Activity className="h-4 w-4 text-emerald-400" aria-hidden /> {readyCount} ready

@@ -7,6 +7,7 @@ import { storeRoutes } from './routes/stores.js';
 import { AuditLog } from './services/audit.js';
 import { HelmClient } from './services/helm.js';
 import { KubernetesClient } from './services/k8s.js';
+import { PlatformMetrics } from './services/metrics.js';
 import { StoreManager } from './services/storeManager.js';
 import { HttpError } from './types.js';
 
@@ -19,9 +20,15 @@ async function main(): Promise<void> {
 
   const audit = new AuditLog(config.auditDbPath, config.auditRetention, (msg) => app.log.warn(msg));
   const k8s = new KubernetesClient();
-  const helm = new HelmClient(config.helmBinary);
+  let metrics: PlatformMetrics | null = null;
+  const helm = new HelmClient(config.helmBinary, undefined, (operation, result, seconds) =>
+    metrics?.observeHelm(operation, result, seconds),
+  );
   const engines = new EngineRegistry(config);
   const stores = new StoreManager(config, k8s, helm, engines, audit, app.log);
+  metrics = new PlatformMetrics({ stores: () => stores.lastKnownStores, audit, maxStores: config.maxStores });
+  stores.setMetrics(metrics);
+  const platformMetrics = metrics;
 
   if (config.corsOrigin) {
     await app.register(cors, { origin: config.corsOrigin.split(',').map((o) => o.trim()) });
@@ -48,6 +55,16 @@ async function main(): Promise<void> {
     kubernetesReachable: stores.isKubernetesReachable,
     auditPersistent: audit.persistent,
   }));
+
+  // Prometheus scrape endpoint. Served on the pod port only: the Ingress routes
+  // /api and /healthz, so /metrics is not reachable from outside the cluster.
+  app.get('/metrics', { logLevel: 'warn' }, async (_request, reply) => {
+    const { contentType, body } = await platformMetrics.render();
+    return reply.header('Content-Type', contentType).send(body);
+  });
+
+  // Aggregated numbers for the dashboard (safe to expose: no tenant data).
+  app.get('/api/metrics/summary', async () => platformMetrics.summary());
 
   app.get('/readyz', async (_request, reply) => {
     const reachable = await k8s.ping();
