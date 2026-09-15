@@ -75,6 +75,20 @@ export class PlatformMetrics {
       },
     });
 
+    new Gauge({
+      name: 'store_platform_store_outcomes',
+      help: 'Lifetime number of distinct stores per outcome (each store counted once).',
+      labelNames: ['outcome'] as const,
+      registers: [this.registry],
+      collect() {
+        this.reset();
+        const outcomes = sources.audit.storeOutcomes();
+        for (const outcome of ['created', 'ready', 'failed', 'deleted'] as const) {
+          this.set({ outcome }, outcomes[outcome]);
+        }
+      },
+    });
+
     this.helmDuration = new Histogram({
       name: 'store_platform_helm_operation_duration_seconds',
       help: 'Duration of helm commands run by the orchestrator.',
@@ -109,20 +123,14 @@ export class PlatformMetrics {
     const byStatus: Record<string, number> = { Provisioning: 0, Ready: 0, Failed: 0, Deleting: 0 };
     for (const store of stores) byStatus[store.status] = (byStatus[store.status] ?? 0) + 1;
 
-    const counts = this.sources.audit.countByAction();
+    const outcomes = this.sources.audit.storeOutcomes();
     const durations = this.sources.audit.recentProvisioningDurations(200);
     const sorted = [...durations].sort((a, b) => a - b);
     const average = durations.length ? Math.round(durations.reduce((sum, d) => sum + d, 0) / durations.length) : null;
 
     return {
       stores: { total: stores.length, byStatus, max: this.sources.maxStores },
-      lifetime: {
-        created: counts.STORE_CREATE_REQUESTED ?? 0,
-        ready: (counts.STORE_READY ?? 0) + (counts.STORE_RECOVERED ?? 0),
-        failed: counts.STORE_FAILED ?? 0,
-        deleted: counts.STORE_DELETED ?? 0,
-        rejected: counts.STORE_CREATE_REJECTED ?? 0,
-      },
+      lifetime: outcomes,
       provisioning: {
         samples: durations.length,
         averageSeconds: average,

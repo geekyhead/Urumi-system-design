@@ -225,11 +225,12 @@ The API keeps no state that a rollback could break. Store state lives in namespa
 | `store_platform_stores` | gauge | `status`, `engine` |
 | `store_platform_stores_max` | gauge | |
 | `store_platform_lifecycle_events_total` | counter | `action` (`STORE_CREATE_REQUESTED`, `STORE_READY`, `STORE_FAILED`, `STORE_DELETED`, `STORE_CREATE_REJECTED`, …) |
+| `store_platform_store_outcomes` | gauge | `outcome` (`created`, `ready`, `failed`, `deleted`); each store counted once |
 | `store_platform_provisioning_duration_seconds` | histogram | `engine`, `outcome` (`ready`, `failed`) |
 | `store_platform_helm_operation_duration_seconds` | histogram | `operation` (`upgrade`, `uninstall`), `result` |
 | `store_platform_process_*` | Node.js process metrics | |
 
-Lifetime counters come from the persistent audit log, so they survive API restarts. Provisioning-time percentiles on the dashboard use the durations recorded on `STORE_READY` events.
+Lifetime counters come from the persistent audit log, so they survive API restarts. The dashboard cards count distinct stores: a store that logs two failure events (for example CrashLoopBackOff, then the Job backoff limit) is one failed store, and a store that fails and later recovers counts as ready. `store_platform_lifecycle_events_total` keeps raw event counts. Provisioning-time percentiles on the dashboard use the durations recorded on `STORE_READY` events.
 
 ```bash
 kubectl port-forward -n store-platform deploy/store-platform-api 8080:8080

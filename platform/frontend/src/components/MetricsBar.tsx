@@ -51,21 +51,21 @@ export function MetricsBar({ metrics }: Props) {
         icon={PackagePlus}
         label="Stores created"
         value={String(lifetime?.created ?? '—')}
-        hint={`${lifetime?.rejected ?? 0} requests rejected`}
+        hint={`${lifetime?.rejected ?? 0} ${lifetime?.rejected === 1 ? 'request' : 'requests'} rejected`}
         tone="text-indigo-300"
       />
       <Stat
         icon={CheckCircle2}
         label="Success rate"
         value={successRate === null ? '—' : `${successRate}%`}
-        hint={`${lifetime?.ready ?? 0} ready of ${finished} finished`}
+        hint={`${lifetime?.ready ?? 0} of ${finished} finished stores ready`}
         tone="text-emerald-400"
       />
       <Stat
         icon={AlertTriangle}
         label="Failures"
         value={String(lifetime?.failed ?? '—')}
-        hint="provisioning failed"
+        hint="stores that never became ready"
         tone="text-rose-400"
       />
       <Stat

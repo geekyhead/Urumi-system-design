@@ -102,6 +102,32 @@ export class AuditLog {
     return Object.fromEntries(rows.map((row) => [row.action, Number(row.total)]));
   }
 
+  /**
+   * Per-store outcomes, counting each store once. A store can log several
+   * STORE_FAILED events (the reason changes as pods retry), so event counts
+   * overstate failures; these distinct counts do not.
+   */
+  storeOutcomes(): { created: number; ready: number; failed: number; deleted: number; rejected: number } {
+    const scalar = (sql: string): number => {
+      const row = this.db.prepare(sql).get() as unknown as { total: number } | undefined;
+      return Number(row?.total ?? 0);
+    };
+    const readyActions = "('STORE_READY', 'STORE_RECOVERED')";
+    return {
+      created: scalar("SELECT COUNT(DISTINCT store_id) AS total FROM audit_log WHERE action = 'STORE_CREATE_REQUESTED'"),
+      ready: scalar(`SELECT COUNT(DISTINCT store_id) AS total FROM audit_log WHERE action IN ${readyActions}`),
+      // Failed and never reached Ready afterwards (recovered stores count as ready).
+      failed: scalar(
+        `SELECT COUNT(DISTINCT store_id) AS total FROM audit_log
+         WHERE action = 'STORE_FAILED' AND store_id IS NOT NULL
+           AND store_id NOT IN (SELECT store_id FROM audit_log WHERE action IN ${readyActions} AND store_id IS NOT NULL)`,
+      ),
+      deleted: scalar("SELECT COUNT(DISTINCT store_id) AS total FROM audit_log WHERE action = 'STORE_DELETED'"),
+      // Rejected requests never get a store id, so these are request counts.
+      rejected: scalar("SELECT COUNT(*) AS total FROM audit_log WHERE action = 'STORE_CREATE_REJECTED'"),
+    };
+  }
+
   /** Provisioning durations (seconds) recorded on STORE_READY events, newest first. */
   recentProvisioningDurations(limit: number): number[] {
     const rows = this.db
