@@ -1,0 +1,6 @@
+apiVersion: v2
+name: platform
+description: Store provisioning platform - orchestrator API and React dashboard
+type: application
+version: 1.0.0
+appVersion: "1.0.0"

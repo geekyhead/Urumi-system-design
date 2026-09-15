@@ -1,0 +1,99 @@
+# Default values for a single store release. Installed once per tenant into
+# namespace store-<id> by the orchestrator. Environment specific overrides live
+# in values-local.yaml and values-prod.yaml.
+
+global:
+  # Store hostname becomes store-<id>.<baseDomain>
+  baseDomain: "127.0.0.1.nip.io"
+  tls: false
+  clusterIssuer: ""
+  storageClass: ""
+  ingressClassName: nginx
+  # Additional domains the store answers on (store-<id>.<alias>), e.g. localhost.
+  aliasDomains: []
+  # Namespace running the ingress controller; allowed through the NetworkPolicy.
+  ingressNamespace: ingress-nginx
+
+store:
+  # Short id (lowercase alphanumeric). Namespace is store-<id>.
+  id: ""
+  name: ""
+  # Catalog seeded into the store. The orchestrator builds this from the store
+  # name, "what will you sell" and custom products; this default keeps
+  # `helm install` usable on its own.
+  catalogData:
+    type: general
+    label: General Store
+    tagline: Something for everyone.
+    hero: A little bit of everything, delivered with Cash on Delivery.
+    products:
+      - name: Classic Hoodie
+        category: Apparel
+        price: "29.99"
+        color: "#6d28d9"
+        short: Cozy cotton blend hoodie.
+        description: Cozy cotton blend hoodie for test orders.
+        featured: true
+  # Brand color for the Storefront header, buttons and home page hero.
+  accentColor: "#7f54b3"
+  adminUser: admin
+  adminEmail: admin@example.com
+
+guardrails:
+  resourceQuota:
+    requestsCpu: 500m
+    requestsMemory: 512Mi
+    limitsCpu: 1500m
+    limitsMemory: 1536Mi
+    persistentVolumeClaims: 2
+    pods: 6
+    services: 4
+  limitRange:
+    defaultRequest:
+      cpu: 50m
+      memory: 64Mi
+    default:
+      cpu: 250m
+      memory: 256Mi
+    max:
+      cpu: "1"
+      memory: 1Gi
+
+mariadb:
+  image: mariadb:10.11
+  storage: 1Gi
+  resources:
+    requests:
+      cpu: 150m
+      memory: 192Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+wordpress:
+  image: wordpress:6.4-php8.2-apache
+  storage: 1Gi
+  resources:
+    requests:
+      cpu: 150m
+      memory: 192Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+seeder:
+  image: wordpress:cli-2.9-php8.2
+  # WooCommerce 8.9.x is the newest line that supports WordPress 6.4.
+  woocommerceVersion: "8.9.3"
+  # WooCommerce's official theme; 4.6.2 supports WordPress 6.4.
+  storefrontVersion: "4.6.2"
+  backoffLimit: 4
+  activeDeadlineSeconds: 900
+  ttlSecondsAfterFinished: 86400
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi

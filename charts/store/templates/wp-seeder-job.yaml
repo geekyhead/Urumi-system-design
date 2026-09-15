@@ -1,0 +1,105 @@
+{{- if not .Values.store.catalogData.products -}}
+{{- fail "store.catalogData.products must contain at least one product" -}}
+{{- end -}}
+{{- if not (regexMatch "^#[0-9a-fA-F]{6}$" .Values.store.accentColor) -}}
+{{- fail "store.accentColor must be a #rrggbb color" -}}
+{{- end -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-seeder-script
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+    app.kubernetes.io/component: seeder
+data:
+  {{- (.Files.Glob "files/*").AsConfig | nindent 2 }}
+  catalog.json: {{ .Values.store.catalogData | toJson | quote }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-seeder
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+    app.kubernetes.io/component: seeder
+spec:
+  backoffLimit: {{ .Values.seeder.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.seeder.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: {{ .Values.seeder.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        {{- include "store.labels" . | nindent 8 }}
+        app.kubernetes.io/component: seeder
+    spec:
+      # Never: each retry is a new pod and failed pods keep their logs for debugging.
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        # Same uid as Apache (www-data) so plugin, theme and upload files are owned correctly.
+        runAsNonRoot: true
+        runAsUser: 33
+        runAsGroup: 33
+        fsGroup: 33
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: wp-cli
+          image: {{ .Values.seeder.image }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/scripts/seed.sh"]
+          env:
+            {{- include "store.wordpressEnv" . | nindent 12 }}
+            - name: HOME
+              value: /tmp
+            - name: WP_CLI_CACHE_DIR
+              value: /tmp/wp-cli-cache
+            - name: WP_CLI_PHP_ARGS
+              value: "-d memory_limit=384M"
+            - name: STORE_ID
+              value: {{ include "store.id" . | quote }}
+            - name: STORE_URL
+              value: {{ include "store.url" . | quote }}
+            - name: STORE_DOMAIN
+              value: {{ include "store.host" . | quote }}
+            - name: STORE_NAME
+              value: {{ .Values.store.name | default (include "store.id" .) | quote }}
+            - name: STORE_ACCENT
+              value: {{ .Values.store.accentColor | quote }}
+            - name: ADMIN_USER
+              value: {{ .Values.store.adminUser | quote }}
+            - name: ADMIN_EMAIL
+              value: {{ .Values.store.adminEmail | quote }}
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "store.secretName" . }}
+                  key: admin-password
+            - name: WOOCOMMERCE_VERSION
+              value: {{ .Values.seeder.woocommerceVersion | quote }}
+            - name: STOREFRONT_VERSION
+              value: {{ .Values.seeder.storefrontVersion | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.seeder.resources | nindent 12 }}
+          volumeMounts:
+            - name: wordpress
+              mountPath: /var/www/html
+            - name: scripts
+              mountPath: /scripts
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: wordpress
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-wordpress
+        - name: scripts
+          configMap:
+            name: {{ .Release.Name }}-seeder-script
+            defaultMode: 0555
+        - name: tmp
+          emptyDir: {}

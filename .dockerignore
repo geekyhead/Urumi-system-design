@@ -1,0 +1,7 @@
+**/node_modules
+**/dist
+.bin
+.git
+*.db
+*.db-wal
+*.db-shm

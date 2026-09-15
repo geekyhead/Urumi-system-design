@@ -1,0 +1,25 @@
+# Dependencies and build output
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Tool binaries downloaded by scripts/setup-cluster.sh
+.bin/
+
+# Local runtime data
+*.db
+*.db-wal
+*.db-shm
+*.log
+backups/
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local environment overrides
+.env
+.env.*
+!.env.example

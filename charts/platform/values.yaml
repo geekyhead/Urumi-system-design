@@ -1,0 +1,68 @@
+nameOverride: ""
+
+api:
+  image:
+    repository: store-platform/api
+    tag: local
+    pullPolicy: IfNotPresent
+  # The audit log is SQLite on a PVC, so the API runs as a single replica.
+  # See SYSTEM_DESIGN.md for the horizontal scaling path.
+  replicas: 1
+  logLevel: info
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  persistence:
+    enabled: true
+    size: 256Mi
+    storageClass: ""
+
+dashboard:
+  image:
+    repository: store-platform/dashboard
+    tag: local
+    pullPolicy: IfNotPresent
+  replicas: 1
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+orchestrator:
+  # "local" uses charts/store/values-local.yaml, "prod" uses values-prod.yaml.
+  storeProfile: local
+  storeBaseDomain: "127.0.0.1.nip.io"
+  storeTls: false
+  # Stores also answer on store-<id>.<alias>; clear for production.
+  storeAliasDomains: ["localhost"]
+  maxStores: 10
+  maxConcurrentProvisions: 3
+  provisionTimeoutSeconds: 300
+  deleteTimeoutSeconds: 300
+  reconcileIntervalMs: 5000
+  helmTimeout: 5m
+  mutationRateLimitPerMinute: 30
+
+rbac:
+  # Denies the API ServiceAccount any namespace/RoleBinding write outside
+  # store-* namespaces (requires Kubernetes >= 1.30).
+  admissionPolicy:
+    enabled: true
+
+ingress:
+  enabled: true
+  className: nginx
+  host: platform.127.0.0.1.nip.io
+  # Extra hostnames for the dashboard (platform.localhost works without DNS).
+  aliasHosts: ["platform.localhost"]
+  tls: false
+  clusterIssuer: ""
+  # Extra annotations, e.g. external auth or source IP allow-lists.
+  annotations: {}

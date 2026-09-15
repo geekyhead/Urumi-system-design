@@ -1,0 +1,91 @@
+{{- $q := .Values.guardrails.resourceQuota -}}
+{{- $l := .Values.guardrails.limitRange -}}
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: {{ .Release.Name }}-quota
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+spec:
+  hard:
+    requests.cpu: {{ $q.requestsCpu | quote }}
+    requests.memory: {{ $q.requestsMemory | quote }}
+    limits.cpu: {{ $q.limitsCpu | quote }}
+    limits.memory: {{ $q.limitsMemory | quote }}
+    persistentvolumeclaims: {{ $q.persistentVolumeClaims | quote }}
+    pods: {{ $q.pods | quote }}
+    services: {{ $q.services | quote }}
+    services.loadbalancers: "0"
+    services.nodeports: "0"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: {{ .Release.Name }}-limits
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: {{ $l.defaultRequest.cpu | quote }}
+        memory: {{ $l.defaultRequest.memory | quote }}
+      default:
+        cpu: {{ $l.default.cpu | quote }}
+        memory: {{ $l.default.memory | quote }}
+      max:
+        cpu: {{ $l.max.cpu | quote }}
+        memory: {{ $l.max.memory | quote }}
+    - type: PersistentVolumeClaim
+      max:
+        storage: 5Gi
+---
+# Default deny: nothing may reach pods in this namespace...
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-default-deny-ingress
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+# ...except pods of this same namespace (WordPress <-> MariaDB <-> seeder Job).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-allow-same-namespace
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector: {}
+---
+# ...and the ingress controller, only towards WordPress on port 80.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-allow-ingress-controller
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: wordpress
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.global.ingressNamespace }}
+      ports:
+        - protocol: TCP
+          port: 80

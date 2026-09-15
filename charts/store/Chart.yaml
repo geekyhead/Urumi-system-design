@@ -1,0 +1,10 @@
+apiVersion: v2
+name: store
+description: Per-tenant WooCommerce store (WordPress + MariaDB + WP-CLI seeder) with namespace guardrails
+type: application
+version: 1.0.0
+appVersion: "6.4"
+keywords:
+  - woocommerce
+  - wordpress
+  - multi-tenant

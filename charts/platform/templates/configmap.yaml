@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "platform.fullname" . }}-api
+  labels:
+    {{- include "platform.labels" . | nindent 4 }}
+data:
+  LOG_LEVEL: {{ .Values.api.logLevel | quote }}
+  STORE_VALUES_PROFILE: {{ .Values.orchestrator.storeProfile | quote }}
+  STORE_BASE_DOMAIN: {{ .Values.orchestrator.storeBaseDomain | quote }}
+  STORE_TLS: {{ .Values.orchestrator.storeTls | quote }}
+  STORE_ALIAS_DOMAINS: {{ join "," .Values.orchestrator.storeAliasDomains | quote }}
+  MAX_STORES: {{ .Values.orchestrator.maxStores | quote }}
+  MAX_CONCURRENT_PROVISIONS: {{ .Values.orchestrator.maxConcurrentProvisions | quote }}
+  PROVISION_TIMEOUT_SECONDS: {{ .Values.orchestrator.provisionTimeoutSeconds | quote }}
+  DELETE_TIMEOUT_SECONDS: {{ .Values.orchestrator.deleteTimeoutSeconds | quote }}
+  RECONCILE_INTERVAL_MS: {{ .Values.orchestrator.reconcileIntervalMs | quote }}
+  HELM_TIMEOUT: {{ .Values.orchestrator.helmTimeout | quote }}
+  MUTATION_RATE_LIMIT_PER_MINUTE: {{ .Values.orchestrator.mutationRateLimitPerMinute | quote }}
+  SERVICE_ACCOUNT_NAME: {{ include "platform.serviceAccountName" . | quote }}
+  TENANT_CLUSTER_ROLE: {{ include "platform.tenantRoleName" . | quote }}
