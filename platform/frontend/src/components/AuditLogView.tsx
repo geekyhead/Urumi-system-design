@@ -1,6 +1,7 @@
 import { CheckCircle2, CirclePlus, Globe, Loader2, RefreshCw, Repeat, ShieldAlert, Trash2, X, XCircle } from 'lucide-react';
-import { useCallback, useEffect, useState, type ComponentType } from 'react';
-import { api } from '../api';
+import { useCallback, useState, type ComponentType } from 'react';
+import { api, errorText } from '../api';
+import { useEscape, usePolling } from '../hooks';
 import { localTime, relativeTime } from '../format';
 import type { AuditEntry } from '../types';
 
@@ -38,23 +39,14 @@ export function AuditLogView({ open, now, onClose }: Props) {
       setEntries(await api.listAudit(200));
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load audit log');
+      setError(errorText(err, 'Failed to load audit log'));
     } finally {
       setLoading(false);
     }
   }, []);
 
-  useEffect(() => {
-    if (!open) return;
-    void load();
-    const interval = setInterval(() => void load(), 5000);
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
-    window.addEventListener('keydown', onKey);
-    return () => {
-      clearInterval(interval);
-      window.removeEventListener('keydown', onKey);
-    };
-  }, [open, load, onClose]);
+  usePolling(load, 5000, open);
+  useEscape(open, onClose);
 
   if (!open) return null;
 

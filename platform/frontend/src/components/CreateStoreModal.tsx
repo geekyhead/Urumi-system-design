@@ -1,6 +1,7 @@
 import { Loader2, PackageSearch, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import { ApiError, api, newIdempotencyKey } from '../api';
+import { api, errorText, newIdempotencyKey } from '../api';
+import { useEscape } from '../hooks';
 import type { CatalogPreview, CustomProduct, EngineType, PlatformInfo, Store } from '../types';
 
 interface Props {
@@ -80,13 +81,9 @@ export function CreateStoreModal({ open, platform, onClose, onCreated }: Props) 
     setSubmitting(false);
     idempotencyKey.current = newIdempotencyKey();
     const t = setTimeout(() => inputRef.current?.focus(), 0);
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
-    window.addEventListener('keydown', onKey);
-    return () => {
-      clearTimeout(t);
-      window.removeEventListener('keydown', onKey);
-    };
-  }, [open, onClose]);
+    return () => clearTimeout(t);
+  }, [open]);
+  useEscape(open, onClose);
 
   const custom = useMemo(() => parseProducts(showCustom ? customText : ''), [customText, showCustom]);
   const trimmed = name.trim();
@@ -147,7 +144,7 @@ export function CreateStoreModal({ open, platform, onClose, onCreated }: Props) 
       });
       onCreated(store);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Unexpected error creating store');
+      setError(errorText(err, 'Unexpected error creating store'));
       setSubmitting(false);
     }
   }

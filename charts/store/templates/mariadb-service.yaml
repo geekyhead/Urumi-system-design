@@ -8,8 +8,7 @@ metadata:
 spec:
   type: ClusterIP
   selector:
-    app.kubernetes.io/component: mariadb
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "store.selectorLabels" (dict "root" . "component" "mariadb") | nindent 4 }}
   ports:
     - name: mysql
       port: 3306

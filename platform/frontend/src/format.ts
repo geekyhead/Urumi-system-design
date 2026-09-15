@@ -32,8 +32,9 @@ export function localTime(iso: string): string {
   });
 }
 
-export function duration(fromIso: string, toIso: string): string {
-  const total = Math.max(0, Math.round((Date.parse(toIso) - Date.parse(fromIso)) / 1000));
+/** 73 -> "1m 13s", null -> "—". */
+export function formatSeconds(total: number | null): string {
+  if (total === null) return '—';
   const minutes = Math.floor(total / 60);
   const seconds = total % 60;
   return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;

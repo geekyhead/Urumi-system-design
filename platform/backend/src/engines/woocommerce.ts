@@ -1,8 +1,18 @@
-import type { V1Job, V1Pod } from '@kubernetes/client-node';
+import type { V1Job } from '@kubernetes/client-node';
 import type { Config } from '../config.js';
 import type { NamespaceSnapshot } from '../services/k8s.js';
-import type { PodHealth, SeederJobState, StoreHealth, StoreUrls } from '../types.js';
-import type { EngineContext, EngineEvaluation, EngineProvider, EngineStoreRef } from './index.js';
+import type { SeederJobState, StoreHealth, StoreUrls } from '../types.js';
+import {
+  podsForRelease,
+  releaseNameFor,
+  storeUrls,
+  toPodHealth,
+  uninstallRelease,
+  type EngineContext,
+  type EngineEvaluation,
+  type EngineProvider,
+  type EngineStoreRef,
+} from './index.js';
 
 /** Waiting reasons that will not resolve on their own. */
 const FATAL_WAITING_REASONS = new Set([
@@ -23,26 +33,16 @@ export class WooCommerceEngineProvider implements EngineProvider {
   constructor(private readonly config: Config) {}
 
   releaseName(store: EngineStoreRef): string {
-    return `store-${store.id}`;
+    return releaseNameFor(store);
   }
 
   urls(store: EngineStoreRef): StoreUrls {
-    const scheme = this.config.tls ? 'https' : 'http';
-    const storefront = `${scheme}://store-${store.id}.${this.config.baseDomain}`;
-    const alias = this.config.storeAliasDomains[0];
-    const alternateStorefront = alias ? `${scheme}://store-${store.id}.${alias}` : null;
-    return {
-      storefront,
-      admin: `${storefront}/wp-admin`,
-      alternateStorefront,
-      alternateAdmin: alternateStorefront ? `${alternateStorefront}/wp-admin` : null,
-      custom: store.customDomains.map((domain) => `${scheme}://${domain}`),
-    };
+    return storeUrls(this.config, store, '/wp-admin', true);
   }
 
   async provision(store: EngineStoreRef, ctx: EngineContext): Promise<void> {
     await ctx.helm.upgradeInstall({
-      release: this.releaseName(store),
+      release: releaseNameFor(store),
       namespace: store.namespace,
       chart: ctx.config.storeChartPath,
       valuesFiles: [ctx.config.storeValuesFile],
@@ -56,19 +56,16 @@ export class WooCommerceEngineProvider implements EngineProvider {
         },
       },
       timeout: ctx.config.helmTimeout,
-      // Readiness is tracked by the reconciler, not by blocking on helm.
-      wait: false,
     });
   }
 
-  async deprovision(store: EngineStoreRef, ctx: EngineContext): Promise<void> {
-    await ctx.helm.uninstall(this.releaseName(store), store.namespace, ctx.config.helmTimeout);
+  deprovision(store: EngineStoreRef, ctx: EngineContext): Promise<void> {
+    return uninstallRelease(store, ctx);
   }
 
   evaluate(store: EngineStoreRef, snapshot: NamespaceSnapshot): EngineEvaluation {
-    const release = this.releaseName(store);
-    const pods = snapshot.pods.filter((p) => p.metadata?.labels?.['app.kubernetes.io/instance'] === release);
-    const podHealth = pods.map(toPodHealth);
+    const release = releaseNameFor(store);
+    const podHealth = podsForRelease(snapshot, release).map(toPodHealth);
     // Seeder Jobs are named per Helm revision; the newest one reflects the current release.
     const seederJob = snapshot.jobs
       .filter(
@@ -94,11 +91,7 @@ export class WooCommerceEngineProvider implements EngineProvider {
         return { phase: 'Failed', health, reason: `${pod.component} pod ${pod.waitingReason}: ${pod.message ?? ''}`.trim() };
       }
       if (pod.waitingReason === 'CrashLoopBackOff' && pod.restarts >= CRASHLOOP_RESTART_THRESHOLD) {
-        return {
-          phase: 'Failed',
-          health,
-          reason: `${pod.component} pod in CrashLoopBackOff after ${pod.restarts} restarts`,
-        };
+        return { phase: 'Failed', health, reason: `${pod.component} pod in CrashLoopBackOff after ${pod.restarts} restarts` };
       }
     }
 
@@ -115,21 +108,6 @@ export class WooCommerceEngineProvider implements EngineProvider {
     if (seeder.state !== 'Succeeded') waiting.push(`seeder (${seeder.state.toLowerCase()})`);
     return { phase: 'Progressing', health, detail: `waiting for ${waiting.join(', ')}` };
   }
-}
-
-function toPodHealth(pod: V1Pod): PodHealth {
-  const statuses = [...(pod.status?.initContainerStatuses ?? []), ...(pod.status?.containerStatuses ?? [])];
-  const waiting = statuses.find((s) => s.state?.waiting?.reason)?.state?.waiting;
-  const readyCondition = pod.status?.conditions?.find((c) => c.type === 'Ready');
-  return {
-    name: pod.metadata?.name ?? 'unknown',
-    component: pod.metadata?.labels?.['app.kubernetes.io/component'] ?? 'unknown',
-    phase: pod.status?.phase ?? 'Unknown',
-    ready: readyCondition?.status === 'True',
-    restarts: statuses.reduce((sum, s) => sum + (s.restartCount ?? 0), 0),
-    waitingReason: waiting?.reason ?? null,
-    message: waiting?.message ?? null,
-  };
 }
 
 function jobState(job: V1Job | undefined): { state: SeederJobState; message: string | null } {

@@ -1,6 +1,7 @@
 import { CheckCircle2, Clock, Globe, Loader2, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { ApiError, api } from '../api';
+import { api, errorText } from '../api';
+import { useEscape } from '../hooks';
 import type { DomainCheck, PlatformInfo, Store } from '../types';
 
 interface Props {
@@ -24,10 +25,8 @@ export function DomainsModal({ store, platform, onClose, onSaved }: Props) {
     setText(store.customDomains.join('\n'));
     setChecks(null);
     setError(null);
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [store, onClose]);
+  }, [store]);
+  useEscape(Boolean(store), onClose);
 
   if (!store) return null;
 
@@ -46,7 +45,7 @@ export function DomainsModal({ store, platform, onClose, onSaved }: Props) {
       onSaved(updated);
       setChecks(null);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Failed to update domains');
+      setError(errorText(err, 'Failed to update domains'));
     } finally {
       setSaving(false);
     }
@@ -59,7 +58,7 @@ export function DomainsModal({ store, platform, onClose, onSaved }: Props) {
     try {
       setChecks(await api.checkDomains(store.id));
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'DNS check failed');
+      setError(errorText(err, 'DNS check failed'));
     } finally {
       setChecking(false);
     }

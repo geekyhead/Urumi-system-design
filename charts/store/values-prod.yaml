@@ -1,60 +1,24 @@
-# Production VPS profile (k3s): real wildcard DNS (*.stores.example.com
-# pointing at the VPS), HTTPS via cert-manager, k3s local-path storage and
-# strict quotas.
+# Production VPS profile (k3s). Only differences from values.yaml are listed:
+# real wildcard DNS (*.stores.example.com pointing at the VPS), HTTPS via
+# cert-manager, k3s local-path storage, stricter per-container limits and
+# larger volumes. The orchestrator passes baseDomain and tls from its config;
+# they are set here too for a manual `helm install`.
 global:
   baseDomain: "stores.example.com"
   tls: true
   clusterIssuer: "letsencrypt-prod"
   storageClass: "local-path"
-  ingressClassName: nginx
-  aliasDomains: []
-  ingressNamespace: ingress-nginx
 
 guardrails:
-  resourceQuota:
-    requestsCpu: 500m
-    requestsMemory: 512Mi
-    limitsCpu: 1500m
-    limitsMemory: 1536Mi
-    persistentVolumeClaims: 2
-    pods: 6
-    services: 4
   limitRange:
-    defaultRequest:
-      cpu: 50m
-      memory: 64Mi
     default:
       cpu: 200m
-      memory: 256Mi
     max:
       cpu: 500m
       memory: 512Mi
 
 mariadb:
   storage: 2Gi
-  resources:
-    requests:
-      cpu: 150m
-      memory: 192Mi
-    limits:
-      cpu: 500m
-      memory: 512Mi
 
 wordpress:
   storage: 2Gi
-  resources:
-    requests:
-      cpu: 150m
-      memory: 192Mi
-    limits:
-      cpu: 500m
-      memory: 512Mi
-
-seeder:
-  resources:
-    requests:
-      cpu: 100m
-      memory: 128Mi
-    limits:
-      cpu: 500m
-      memory: 512Mi

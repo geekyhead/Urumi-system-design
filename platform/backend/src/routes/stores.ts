@@ -4,7 +4,7 @@ import type { AuditLog } from '../services/audit.js';
 import type { AuthUser } from '../services/auth.js';
 import type { PlatformMetrics } from '../services/metrics.js';
 import type { StoreManager } from '../services/storeManager.js';
-import { ENGINE_TYPES, HttpError, type AuditEntry, type EngineType } from '../types.js';
+import { ENGINE_TYPES, HttpError, STORE_ID_PATTERN, type AuditEntry, type EngineType } from '../types.js';
 
 interface CatalogFields {
   catalog?: string;
@@ -21,7 +21,7 @@ interface CreateStoreBody extends CatalogFields {
 const storeIdParams = {
   type: 'object',
   required: ['id'],
-  properties: { id: { type: 'string', pattern: '^[a-z0-9]{3,20}$' } },
+  properties: { id: { type: 'string', pattern: STORE_ID_PATTERN } },
 } as const;
 
 const catalogProperties = {
@@ -72,8 +72,7 @@ export async function storeRoutes(app: FastifyInstance, opts: StoreRoutesOptions
 
   app.get('/api/me', async (request) => {
     const user = userOf(request);
-    const owned = (await stores.list(user)).filter((s) => s.owner === user.name && s.status !== 'Deleting').length;
-    return { user, quota: { used: owned, max: user.maxStores } };
+    return { user, quota: { used: stores.countActive(await stores.list(user), user.name), max: user.maxStores } };
   });
 
   app.get('/api/platform', async (request) => stores.platformInfo(userOf(request)));
@@ -181,7 +180,7 @@ export async function storeRoutes(app: FastifyInstance, opts: StoreRoutesOptions
           type: 'object',
           properties: {
             limit: { type: 'integer', minimum: 1, maximum: 1000, default: 100 },
-            storeId: { type: 'string', pattern: '^[a-z0-9]{3,20}$' },
+            storeId: { type: 'string', pattern: STORE_ID_PATTERN },
           },
         },
       },
@@ -191,9 +190,9 @@ export async function storeRoutes(app: FastifyInstance, opts: StoreRoutesOptions
       const { limit, storeId } = request.query;
       if (user.role === 'admin') return audit.list({ limit, storeId });
       // Users only see events for their own stores and their own actions.
-      const own = new Set((await stores.list(user)).map((s) => s.id));
+      const [owned, entries] = await Promise.all([stores.list(user), audit.list({ limit: 1000, storeId })]);
+      const own = new Set(owned.map((s) => s.id));
       if (storeId && !own.has(storeId)) return [];
-      const entries = await audit.list({ limit: 1000, storeId });
       return entries
         .filter((e) => (e.storeId && own.has(e.storeId)) || e.actor.startsWith(`${user.name} (`))
         .slice(0, limit ?? 100);

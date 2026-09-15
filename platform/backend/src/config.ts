@@ -41,7 +41,6 @@ export const config = {
 
   storeChartPath: path.join(chartsDir, 'store'),
   storeValuesFile: path.join(chartsDir, 'store', `values-${valuesProfile}.yaml`),
-  valuesProfile,
   baseDomain: str('STORE_BASE_DOMAIN', valuesProfile === 'prod' ? 'stores.example.com' : '127.0.0.1.nip.io'),
   tls: bool('STORE_TLS', valuesProfile === 'prod'),
   /** Extra domains every store also answers on, e.g. "localhost" for store-<id>.localhost. */

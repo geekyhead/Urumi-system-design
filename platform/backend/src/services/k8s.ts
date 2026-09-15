@@ -41,6 +41,7 @@ export class KubernetesClient {
   private readonly core: k8s.CoreV1Api;
   private readonly batch: k8s.BatchV1Api;
   private readonly rbac: k8s.RbacAuthorizationV1Api;
+  private inflightNamespaceList: Promise<k8s.V1Namespace[]> | null = null;
 
   constructor(kubeConfig?: k8s.KubeConfig) {
     const kc = kubeConfig ?? new k8s.KubeConfig();
@@ -50,9 +51,18 @@ export class KubernetesClient {
     this.rbac = kc.makeApiClient(k8s.RbacAuthorizationV1Api);
   }
 
-  async listStoreNamespaces(): Promise<k8s.V1Namespace[]> {
-    const list = await this.core.listNamespace({ labelSelector: `${LABEL_MANAGED}=true` });
-    return list.items;
+  /**
+   * Lists store namespaces. Callers that overlap (the dashboard fetches stores
+   * and platform info together, the reconciler runs alongside) share one request.
+   */
+  listStoreNamespaces(): Promise<k8s.V1Namespace[]> {
+    this.inflightNamespaceList ??= this.core
+      .listNamespace({ labelSelector: `${LABEL_MANAGED}=true` })
+      .then((list) => list.items)
+      .finally(() => {
+        this.inflightNamespaceList = null;
+      });
+    return this.inflightNamespaceList;
   }
 
   async getNamespace(name: string): Promise<k8s.V1Namespace | null> {

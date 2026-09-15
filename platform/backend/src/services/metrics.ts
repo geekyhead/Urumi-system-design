@@ -1,5 +1,5 @@
 import { Counter, Gauge, Histogram, Registry, collectDefaultMetrics } from 'prom-client';
-import type { StoreRecord } from '../types.js';
+import type { MetricsSummary, StoreRecord } from '../types.js';
 import type { AuditLog } from './audit.js';
 
 export interface MetricsSources {
@@ -9,18 +9,6 @@ export interface MetricsSources {
   maxStores: number;
   instance: string;
   isLeader: () => boolean;
-}
-
-export interface MetricsSummary {
-  stores: { total: number; byStatus: Record<string, number>; max: number };
-  lifetime: { created: number; ready: number; failed: number; deleted: number; rejected: number };
-  provisioning: {
-    samples: number;
-    averageSeconds: number | null;
-    p50Seconds: number | null;
-    p95Seconds: number | null;
-    lastSeconds: number | null;
-  };
 }
 
 function percentile(sorted: number[], p: number): number | null {
@@ -135,7 +123,7 @@ export class PlatformMetrics {
     const byStatus: Record<string, number> = { Provisioning: 0, Ready: 0, Failed: 0, Deleting: 0 };
     for (const store of stores) byStatus[store.status] = (byStatus[store.status] ?? 0) + 1;
 
-    const [outcomes, durations] = await Promise.all([
+    const [lifetime, durations] = await Promise.all([
       this.sources.audit.storeOutcomes(),
       this.sources.audit.recentProvisioningDurations(200),
     ]);
@@ -144,7 +132,7 @@ export class PlatformMetrics {
 
     return {
       stores: { total: stores.length, byStatus, max: this.sources.maxStores },
-      lifetime: outcomes,
+      lifetime,
       provisioning: {
         samples: durations.length,
         averageSeconds: average,

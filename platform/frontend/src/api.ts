@@ -7,7 +7,6 @@ import type {
   MetricsSummary,
   PlatformInfo,
   Store,
-  StoreDetail,
 } from './types';
 
 export class ApiError extends Error {
@@ -19,6 +18,11 @@ export class ApiError extends Error {
     super(message);
     this.name = 'ApiError';
   }
+}
+
+/** User-facing message for a failed call: the API's message, or a fallback. */
+export function errorText(err: unknown, fallback: string): string {
+  return err instanceof ApiError ? err.message : fallback;
 }
 
 const TOKEN_KEY = 'store-orchestrator-token';
@@ -102,7 +106,6 @@ export const api = {
   previewCatalog: (body: Omit<CreateStoreRequest, 'engine' | 'idempotencyKey'>, signal?: AbortSignal) =>
     request<CatalogPreview>('/api/catalogs/preview', { method: 'POST', body: JSON.stringify(body), signal }),
   listStores: () => request<Store[]>('/api/stores'),
-  getStore: (id: string) => request<StoreDetail>(`/api/stores/${encodeURIComponent(id)}`),
   createStore: (body: CreateStoreRequest) =>
     request<Store>('/api/stores', { method: 'POST', body: JSON.stringify(body) }),
   deleteStore: (id: string) => request<Store>(`/api/stores/${encodeURIComponent(id)}`, { method: 'DELETE' }),

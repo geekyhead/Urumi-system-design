@@ -3,6 +3,11 @@ import type { NamespaceSnapshot } from '../services/k8s.js';
 import type { StoreUrls } from '../types.js';
 import {
   EngineUnavailableError,
+  podsForRelease,
+  releaseNameFor,
+  storeUrls,
+  toPodHealth,
+  uninstallRelease,
   type EngineContext,
   type EngineEvaluation,
   type EngineProvider,
@@ -34,50 +39,29 @@ export class MedusaEngineProvider implements EngineProvider {
   readonly description = 'Medusa backend + Postgres + Redis + Next.js storefront (interface only, not provisionable yet).';
   readonly available = false;
 
-  static readonly components = ['medusa-backend', 'medusa-worker', 'postgres', 'redis', 'storefront'] as const;
-
   constructor(private readonly config: Config) {}
 
   releaseName(store: EngineStoreRef): string {
-    return `store-${store.id}`;
+    return releaseNameFor(store);
   }
 
   urls(store: EngineStoreRef): StoreUrls {
-    const scheme = this.config.tls ? 'https' : 'http';
-    const storefront = `${scheme}://store-${store.id}.${this.config.baseDomain}`;
-    return {
-      storefront,
-      admin: `${storefront}/app`,
-      alternateStorefront: null,
-      alternateAdmin: null,
-      custom: store.customDomains.map((domain) => `${scheme}://${domain}`),
-    };
+    return storeUrls(this.config, store, '/app', false);
   }
 
   async provision(_store: EngineStoreRef, _ctx: EngineContext): Promise<void> {
-    throw new EngineUnavailableError(this.type, 'The MedusaJS engine is not available on this platform yet.');
+    throw new EngineUnavailableError('The MedusaJS engine is not available on this platform yet.');
   }
 
-  async deprovision(store: EngineStoreRef, ctx: EngineContext): Promise<void> {
-    // Nothing is ever installed for Medusa, but uninstall is safe and keeps
-    // teardown uniform if a release was created manually.
-    await ctx.helm.uninstall(this.releaseName(store), store.namespace, ctx.config.helmTimeout);
+  /** Nothing is ever installed for Medusa, but uninstall keeps teardown uniform. */
+  deprovision(store: EngineStoreRef, ctx: EngineContext): Promise<void> {
+    return uninstallRelease(store, ctx);
   }
 
   evaluate(store: EngineStoreRef, snapshot: NamespaceSnapshot): EngineEvaluation {
-    const release = this.releaseName(store);
-    const pods = snapshot.pods.filter((p) => p.metadata?.labels?.['app.kubernetes.io/instance'] === release);
     const health = {
       helmRelease: snapshot.helmReleasePresent,
-      pods: pods.map((p) => ({
-        name: p.metadata?.name ?? 'unknown',
-        component: p.metadata?.labels?.['app.kubernetes.io/component'] ?? 'unknown',
-        phase: p.status?.phase ?? 'Unknown',
-        ready: p.status?.conditions?.some((c) => c.type === 'Ready' && c.status === 'True') ?? false,
-        restarts: (p.status?.containerStatuses ?? []).reduce((n, s) => n + s.restartCount, 0),
-        waitingReason: null,
-        message: null,
-      })),
+      pods: podsForRelease(snapshot, releaseNameFor(store)).map(toPodHealth),
       seederJob: 'Missing' as const,
       seederMessage: null,
     };

@@ -8,8 +8,7 @@ metadata:
 spec:
   type: ClusterIP
   selector:
-    app.kubernetes.io/component: wordpress
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "store.selectorLabels" (dict "root" . "component" "wordpress") | nindent 4 }}
   ports:
     - name: http
       port: 80

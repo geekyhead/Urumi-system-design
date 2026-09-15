@@ -1,16 +1,10 @@
 import { AlertTriangle, CheckCircle2, Clock, PackagePlus, Trash2 } from 'lucide-react';
 import type { ComponentType } from 'react';
+import { formatSeconds } from '../format';
 import type { MetricsSummary } from '../types';
 
 interface Props {
   metrics: MetricsSummary | null;
-}
-
-function formatSeconds(value: number | null): string {
-  if (value === null) return '—';
-  const minutes = Math.floor(value / 60);
-  const seconds = value % 60;
-  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
 }
 
 function Stat({

@@ -77,8 +77,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/component: wordpress
-      app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- include "store.selectorLabels" (dict "root" . "component" "wordpress") | nindent 6 }}
   policyTypes:
     - Ingress
   ingress:

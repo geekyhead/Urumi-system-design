@@ -1,3 +1,6 @@
+/** Store ids are lowercase alphanumeric; used by request schemas and the store chart. */
+export const STORE_ID_PATTERN = '^[a-z0-9]{3,20}$';
+
 export const ENGINE_TYPES = ['woocommerce', 'medusa'] as const;
 export type EngineType = (typeof ENGINE_TYPES)[number];
 
@@ -92,6 +95,26 @@ export interface PlatformInfo {
   engines: Array<{ type: EngineType; displayName: string; available: boolean; description: string }>;
   catalogs: Array<{ type: string; label: string; description: string }>;
   baseDomain: string;
+}
+
+export interface StoreOutcomes {
+  created: number;
+  ready: number;
+  failed: number;
+  deleted: number;
+  rejected: number;
+}
+
+export interface MetricsSummary {
+  stores: { total: number; byStatus: Record<string, number>; max: number };
+  lifetime: StoreOutcomes;
+  provisioning: {
+    samples: number;
+    averageSeconds: number | null;
+    p50Seconds: number | null;
+    p95Seconds: number | null;
+    lastSeconds: number | null;
+  };
 }
 
 export interface DomainCheck {

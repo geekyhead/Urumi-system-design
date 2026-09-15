@@ -3,19 +3,16 @@
 # installs the platform Helm chart.
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-export PATH="${ROOT_DIR}/.bin:${PATH}"
+LOG_PREFIX=deploy
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 CLUSTER_NAME="${CLUSTER_NAME:-store-platform}"
-NAMESPACE="${PLATFORM_NAMESPACE:-store-platform}"
-RELEASE="${PLATFORM_RELEASE:-store-platform}"
+NAMESPACE="${PLATFORM_NAMESPACE}"
+RELEASE="${PLATFORM_RELEASE}"
 IMAGE_TAG="${IMAGE_TAG:-local-$(date +%Y%m%d%H%M%S)}"
 API_IMAGE="store-platform/api:${IMAGE_TAG}"
 DASHBOARD_IMAGE="store-platform/dashboard:${IMAGE_TAG}"
 PLATFORM_HOST="${PLATFORM_HOST:-platform.127.0.0.1.nip.io}"
-
-log() { printf '\033[1;34m[deploy]\033[0m %s\n' "$*"; }
-die() { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
 
 for bin in docker kind kubectl helm curl; do
   command -v "${bin}" >/dev/null 2>&1 || die "${bin} not found. Run 'make setup' first."
@@ -81,8 +78,7 @@ for _ in $(seq 1 60); do
     log "API:       http://${PLATFORM_HOST}/api/stores"
     if kubectl get secret -n "${NAMESPACE}" "${RELEASE}-auth" >/dev/null 2>&1; then
       log "Sign-in tokens (also: make tokens):"
-      kubectl get secret -n "${NAMESPACE}" "${RELEASE}-auth" -o jsonpath='{.data.users\.json}' | base64 -d \
-        | jq -r '.[] | "  \(.name) (\(.role), max \(.maxStores) stores): \(.token)"'
+      print_tokens | sed 's/^/  /'
     fi
     exit 0
   fi

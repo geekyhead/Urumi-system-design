@@ -18,7 +18,6 @@ export interface AuthUser {
 
 export interface Me {
   user: AuthUser;
-  quota: { used: number; max: number };
 }
 
 export interface DomainCheck {
@@ -45,25 +44,6 @@ export interface Store {
   createdAt: string;
   readyAt: string | null;
   urls: StoreUrls;
-}
-
-export interface PodHealth {
-  name: string;
-  component: string;
-  phase: string;
-  ready: boolean;
-  restarts: number;
-  waitingReason: string | null;
-  message: string | null;
-}
-
-export interface StoreDetail extends Store {
-  health: {
-    helmRelease: boolean;
-    pods: PodHealth[];
-    seederJob: 'Pending' | 'Running' | 'Succeeded' | 'Failed' | 'Missing';
-    seederMessage: string | null;
-  };
 }
 
 export interface AuditEntry {

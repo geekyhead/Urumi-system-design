@@ -26,38 +26,29 @@ async function main(): Promise<void> {
     bodyLimit: 16 * 1024,
   });
 
-  const warn = (msg: string) => app.log.warn(msg);
   const audit = createAuditLog(
     { backend: config.auditBackend, sqlitePath: config.auditDbPath, retention: config.auditRetention },
-    warn,
+    (msg) => app.log.warn(msg),
   );
   await audit.init();
 
   const auth = new Authenticator(config.authEnabled, config.authUsersFile, config.maxStores);
   const k8s = new KubernetesClient();
-  let metrics: PlatformMetrics | null = null;
-  const helm = new HelmClient(config.helmBinary, undefined, (operation, result, seconds) =>
-    metrics?.observeHelm(operation, result, seconds),
-  );
-  const engines = new EngineRegistry(config);
-  const stores = new StoreManager(config, k8s, helm, engines, audit, app.log);
-
   const leader = config.leaderElection
     ? new LeaderElector(config.platformNamespace, config.leaseName, config.podName, config.leaseSeconds, (msg, extra) =>
         app.log.info(extra ?? {}, msg),
       )
     : null;
-  if (leader) stores.setLeader(leader);
-
-  metrics = new PlatformMetrics({
+  // Metrics read the store manager lazily (only when scraped), so it can be created afterwards.
+  const metrics: PlatformMetrics = new PlatformMetrics({
     stores: () => stores.lastKnownStores,
     audit,
     maxStores: config.maxStores,
     instance: config.podName,
     isLeader: () => stores.isLeader,
   });
-  stores.setMetrics(metrics);
-  const platformMetrics = metrics;
+  const helm = new HelmClient(config.helmBinary, (operation, result, seconds) => metrics.observeHelm(operation, result, seconds));
+  const stores: StoreManager = new StoreManager(config, k8s, helm, new EngineRegistry(config), audit, app.log, metrics, leader);
 
   app.log.info(
     {
@@ -115,7 +106,7 @@ async function main(): Promise<void> {
   // Prometheus scrape endpoint. Served on the pod port only: the Ingress routes
   // /api and /healthz, so /metrics is not reachable from outside the cluster.
   app.get('/metrics', { logLevel: 'warn' }, async (_request, reply) => {
-    const { contentType, body } = await platformMetrics.render();
+    const { contentType, body } = await metrics.render();
     return reply.header('Content-Type', contentType).send(body);
   });
 
@@ -127,15 +118,15 @@ async function main(): Promise<void> {
   await app.register(storeRoutes, {
     stores,
     audit,
-    metrics: platformMetrics,
+    metrics,
     mutationRateLimitPerMinute: config.mutationRateLimitPerMinute,
   });
 
-  try {
-    app.log.info({ helm: await helm.version() }, 'helm available');
-  } catch (err) {
-    app.log.error({ err }, 'helm binary not usable; provisioning will fail');
-  }
+  // Informational only; do not delay the pod becoming ready.
+  helm.version().then(
+    (version) => app.log.info({ helm: version }, 'helm available'),
+    (err: unknown) => app.log.error({ err }, 'helm binary not usable; provisioning will fail'),
+  );
 
   leader?.start();
   stores.start();

@@ -1,4 +1,5 @@
 import * as k8s from '@kubernetes/client-node';
+import { errorMessage } from '../util.js';
 import { isApiError } from './k8s.js';
 
 /**
@@ -59,15 +60,12 @@ export class LeaderElector {
     if (this.timer) clearInterval(this.timer);
     if (!this.leader) return;
     try {
-      const lease = await this.api.readNamespacedLease({ name: this.leaseName, namespace: this.namespace });
-      if (lease.spec?.holderIdentity === this.identity) {
-        lease.spec.holderIdentity = undefined;
-        lease.spec.renewTime = undefined;
-        lease.spec.acquireTime = micro(lease.spec.acquireTime);
-        await this.api.replaceNamespacedLease({ name: this.leaseName, namespace: this.namespace, body: lease });
+      const lease = await this.read();
+      if (lease?.spec?.holderIdentity === this.identity) {
+        await this.write({ ...lease, spec: { ...lease.spec, holderIdentity: undefined, renewTime: undefined } }, false);
       }
     } catch (err) {
-      this.log('leader: failed to release lease', { err: (err as Error).message });
+      this.log('leader: failed to release lease', { err: errorMessage(err) });
     }
     this.setState(false, null);
   }
@@ -75,27 +73,22 @@ export class LeaderElector {
   private async tick(): Promise<void> {
     const now = new Date();
     try {
-      let lease: k8s.V1Lease | null = null;
-      try {
-        lease = await this.api.readNamespacedLease({ name: this.leaseName, namespace: this.namespace });
-      } catch (err) {
-        if (!isApiError(err, 404)) throw err;
-      }
+      const lease = await this.read();
 
       if (!lease) {
-        await this.api.createNamespacedLease({
-          namespace: this.namespace,
-          body: {
+        await this.write(
+          {
             metadata: { name: this.leaseName, namespace: this.namespace },
             spec: {
               holderIdentity: this.identity,
               leaseDurationSeconds: this.leaseSeconds,
-              acquireTime: micro(now),
-              renewTime: micro(now),
+              acquireTime: now,
+              renewTime: now,
               leaseTransitions: 0,
             },
           },
-        });
+          true,
+        );
         this.lastRenew = Date.now();
         this.setState(true, this.identity);
         return;
@@ -108,16 +101,15 @@ export class LeaderElector {
 
       if (spec.holderIdentity === this.identity || expired) {
         const takeover = spec.holderIdentity !== this.identity;
-        lease.spec = {
+        const renewed: k8s.V1LeaseSpec = {
           ...spec,
           holderIdentity: this.identity,
           leaseDurationSeconds: this.leaseSeconds,
-          acquireTime: micro(takeover ? now : spec.acquireTime),
-          renewTime: micro(now),
-          ...(takeover ? { leaseTransitions: (spec.leaseTransitions ?? 0) + 1 } : {}),
+          renewTime: now,
+          ...(takeover ? { acquireTime: now, leaseTransitions: (spec.leaseTransitions ?? 0) + 1 } : {}),
         };
         // replace carries resourceVersion, so two replicas taking over at once conflict (409) and only one wins.
-        await this.api.replaceNamespacedLease({ name: this.leaseName, namespace: this.namespace, body: lease });
+        await this.write({ ...lease, spec: renewed }, false);
         this.lastRenew = Date.now();
         this.setState(true, this.identity);
       } else {
@@ -128,12 +120,33 @@ export class LeaderElector {
         this.setState(false, this.holder);
         return;
       }
-      this.log('leader: lease update failed', { err: (err as Error).message });
+      this.log('leader: lease update failed', { err: errorMessage(err) });
       // Stop acting as leader once our own lease could have expired.
       if (this.leader && Date.now() > this.lastRenew + this.leaseSeconds * 1000) {
         this.setState(false, null);
       }
     }
+  }
+
+  private async read(): Promise<k8s.V1Lease | null> {
+    try {
+      return await this.api.readNamespacedLease({ name: this.leaseName, namespace: this.namespace });
+    } catch (err) {
+      if (isApiError(err, 404)) return null;
+      throw err;
+    }
+  }
+
+  /** Every lease write goes through here so all MicroTime fields are serialised correctly. */
+  private write(lease: k8s.V1Lease, create: boolean): Promise<k8s.V1Lease> {
+    const spec = lease.spec ?? {};
+    const body: k8s.V1Lease = {
+      ...lease,
+      spec: { ...spec, acquireTime: micro(spec.acquireTime), renewTime: micro(spec.renewTime) },
+    };
+    return create
+      ? this.api.createNamespacedLease({ namespace: this.namespace, body })
+      : this.api.replaceNamespacedLease({ name: this.leaseName, namespace: this.namespace, body });
   }
 
   private setState(leader: boolean, holder: string | null): void {

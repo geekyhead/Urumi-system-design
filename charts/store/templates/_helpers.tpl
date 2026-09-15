@@ -40,6 +40,12 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 platform.io/store-id: {{ include "store.id" . | quote }}
 {{- end -}}
 
+{{/* Selector labels for one store component. Args: (dict "root" . "component" "wordpress") */}}
+{{- define "store.selectorLabels" -}}
+app.kubernetes.io/component: {{ .component }}
+app.kubernetes.io/instance: {{ .root.Release.Name }}
+{{- end -}}
+
 {{- define "store.secretName" -}}
 {{ .Release.Name }}-credentials
 {{- end -}}

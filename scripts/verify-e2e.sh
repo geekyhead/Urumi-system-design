@@ -4,8 +4,8 @@
 #   Store API -> delete store -> assert namespace is gone.
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-export PATH="${ROOT_DIR}/.bin:${PATH}"
+LOG_PREFIX=e2e
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 PLATFORM_HOST="${PLATFORM_HOST:-platform.127.0.0.1.nip.io}"
 API="${API_URL:-http://${PLATFORM_HOST}/api}"
@@ -21,7 +21,6 @@ COMPLETED=false
 LAST_CODE=""
 BODY=""
 
-log()  { printf '\033[1;34m[e2e]\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m[SUCCESS]\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31m[FAIL]\033[0m %s\n' "$*" >&2; exit 1; }
 
@@ -44,11 +43,7 @@ for bin in curl jq kubectl; do
 done
 
 # API token: API_TOKEN env, otherwise the first admin token from the platform Secret.
-if [[ -z "${API_TOKEN:-}" ]]; then
-  API_TOKEN="$(kubectl get secret -n "${PLATFORM_NAMESPACE:-store-platform}" store-platform-auth \
-    -o jsonpath='{.data.users\.json}' 2>/dev/null | base64 -d 2>/dev/null \
-    | jq -r '[.[] | select(.role == "admin")][0].token // empty' 2>/dev/null || true)"
-fi
+API_TOKEN="${API_TOKEN:-$(admin_token)}"
 AUTH_HEADER=()
 [[ -n "${API_TOKEN}" ]] && AUTH_HEADER=(-H "Authorization: Bearer ${API_TOKEN}")
 api() { curl "${AUTH_HEADER[@]}" "$@"; }

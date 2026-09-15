@@ -1,41 +1,26 @@
-# Local Kind / k3d / Minikube profile: nip.io wildcard DNS, HTTP only,
-# Kind's default "standard" StorageClass and relaxed quotas so a laptop can
-# run several stores while WooCommerce is being installed.
+# Local Kind / k3d / Minikube profile. Only differences from values.yaml are
+# listed: Kind's "standard" StorageClass, a *.localhost alias for browsers
+# that block nip.io, and relaxed limits so a laptop can run several stores
+# while WooCommerce installs. The orchestrator also passes baseDomain and tls.
 global:
-  baseDomain: "127.0.0.1.nip.io"
-  tls: false
-  clusterIssuer: ""
   storageClass: "standard"
-  ingressClassName: nginx
-  # store-<id>.localhost resolves to 127.0.0.1 in Chrome/Firefox without DNS,
-  # which helps in browsers or networks that block nip.io.
+  # store-<id>.localhost resolves to 127.0.0.1 in Chrome/Firefox without DNS.
   aliasDomains: ["localhost"]
-  ingressNamespace: ingress-nginx
 
 guardrails:
   resourceQuota:
-    requestsCpu: 500m
-    requestsMemory: 512Mi
     limitsCpu: "2"
     limitsMemory: 2Gi
-    persistentVolumeClaims: 2
     pods: 8
-    services: 4
 
 mariadb:
   resources:
-    requests:
-      cpu: 150m
-      memory: 192Mi
     limits:
       cpu: 750m
       memory: 640Mi
 
 wordpress:
   resources:
-    requests:
-      cpu: 150m
-      memory: 192Mi
     limits:
       cpu: 750m
       memory: 640Mi

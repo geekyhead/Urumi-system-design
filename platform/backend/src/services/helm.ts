@@ -4,10 +4,11 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
+const COMMAND_TIMEOUT_MS = 10 * 60 * 1000;
+
 export class HelmError extends Error {
   constructor(
     message: string,
-    public readonly exitCode: number | null,
     public readonly stderr: string,
   ) {
     super(message);
@@ -27,7 +28,6 @@ export interface UpgradeInstallOptions {
   valuesFiles: string[];
   values: Record<string, unknown>;
   timeout: string;
-  wait?: boolean;
 }
 
 export type HelmObserver = (operation: string, result: 'success' | 'error', seconds: number) => void;
@@ -35,16 +35,18 @@ export type HelmObserver = (operation: string, result: 'success' | 'error', seco
 export class HelmClient {
   constructor(
     private readonly binary: string,
-    private readonly commandTimeoutMs = 10 * 60 * 1000,
     private readonly observe: HelmObserver = () => {},
   ) {}
 
-  /** Idempotent install: running it twice converges to the same release. */
+  /**
+   * Idempotent install: running it twice converges to the same release. It does
+   * not wait for workloads; the reconciler tracks readiness.
+   */
   async upgradeInstall(opts: UpgradeInstallOptions): Promise<string> {
     const valuesPath = path.join(os.tmpdir(), `values-${opts.release}-${randomUUID()}.json`);
     await fs.writeFile(valuesPath, JSON.stringify(opts.values), { mode: 0o600 });
     try {
-      const args = [
+      return await this.run([
         'upgrade',
         '--install',
         opts.release,
@@ -58,9 +60,7 @@ export class HelmClient {
         ...opts.valuesFiles.flatMap((file) => ['-f', file]),
         '-f',
         valuesPath,
-      ];
-      if (opts.wait) args.push('--wait');
-      return await this.run(args);
+      ]);
     } finally {
       await fs.rm(valuesPath, { force: true });
     }
@@ -82,14 +82,13 @@ export class HelmClient {
 
   private async run(args: string[]): Promise<string> {
     const started = process.hrtime.bigint();
-    const operation = args[0] ?? 'unknown';
+    let result: 'success' | 'error' = 'error';
     try {
       const output = await this.exec(args);
-      this.observe(operation, 'success', Number(process.hrtime.bigint() - started) / 1e9);
+      result = 'success';
       return output;
-    } catch (err) {
-      this.observe(operation, 'error', Number(process.hrtime.bigint() - started) / 1e9);
-      throw err;
+    } finally {
+      this.observe(args[0] ?? 'unknown', result, Number(process.hrtime.bigint() - started) / 1e9);
     }
   }
 
@@ -98,12 +97,12 @@ export class HelmClient {
       const child = spawn(this.binary, args, { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
       let stdout = '';
       let stderr = '';
-      const timer = setTimeout(() => child.kill('SIGTERM'), this.commandTimeoutMs);
+      const timer = setTimeout(() => child.kill('SIGTERM'), COMMAND_TIMEOUT_MS);
       child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString()));
       child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
       child.on('error', (err) => {
         clearTimeout(timer);
-        reject(new HelmError(`failed to execute helm: ${err.message}`, null, err.message));
+        reject(new HelmError(`failed to execute helm: ${err.message}`, err.message));
       });
       child.on('close', (code) => {
         clearTimeout(timer);
@@ -111,7 +110,7 @@ export class HelmClient {
           resolve(stdout);
         } else {
           const detail = stderr.trim().split('\n').slice(-3).join(' ') || `exit code ${code}`;
-          reject(new HelmError(`helm ${args[0]} failed: ${detail}`, code, stderr));
+          reject(new HelmError(`helm ${args[0]} failed: ${detail}`, stderr));
         }
       });
     });

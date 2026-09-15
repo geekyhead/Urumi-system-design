@@ -12,7 +12,9 @@
 # Re-running the script is safe; every step is `helm upgrade --install` or idempotent.
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LOG_PREFIX=vps
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 DOMAIN=""
 EMAIL=""
 PUBLIC_IP=""
@@ -20,9 +22,6 @@ REGISTRY="ghcr.io/geekyhead/urumi-system-design"
 TAG="latest"
 INGRESS_NGINX_VERSION="${INGRESS_NGINX_VERSION:-4.11.3}"
 CERT_MANAGER_VERSION="${CERT_MANAGER_VERSION:-v1.16.2}"
-
-log() { printf '\033[1;34m[vps]\033[0m %s\n' "$*"; }
-die() { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -122,5 +121,4 @@ DNS records required (create them if you have not):
 
 Sign-in tokens:
 EOF
-kubectl get secret -n store-platform store-platform-auth -o jsonpath='{.data.users\.json}' | base64 -d \
-  | jq -r '.[] | "  \(.name) (\(.role), max \(.maxStores) stores): \(.token)"'
+print_tokens | sed 's/^/  /'

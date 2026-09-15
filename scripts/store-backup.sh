@@ -5,17 +5,14 @@
 # Output: backups/<store-id>/<timestamp>/
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-export PATH="${ROOT_DIR}/.bin:${PATH}"
+LOG_PREFIX=backup
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 STORE_ID="${1:?usage: store-backup.sh <store-id>}"
-NAMESPACE="store-${STORE_ID}"
-RELEASE="store-${STORE_ID}"
+NAMESPACE="$(store_namespace "${STORE_ID}")"
+RELEASE="${NAMESPACE}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 DEST="${BACKUP_DIR:-${ROOT_DIR}/backups}/${STORE_ID}/${STAMP}"
-
-log() { printf '\033[1;34m[backup]\033[0m %s\n' "$*"; }
-die() { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
 
 kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1 || die "namespace ${NAMESPACE} not found"
 mkdir -p "${DEST}"

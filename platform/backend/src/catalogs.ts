@@ -440,16 +440,28 @@ function fromItems(items: string[], storeName: string, storeId: string): Product
     ['Essential', 1, 'Great value pick for everyday use.'],
     ['Premium', 2.2, 'Upgraded materials and a longer warranty.'],
   ];
-  const rows: ProductRow[] = [];
-  items.forEach((item, index) => {
+  // Two tiers for each of the first six items: at most 12 products.
+  return items.slice(0, 6).flatMap((item) => {
     const base = 12 + (hashByte(`${storeId}:${item}`) % 60);
-    for (const [tier, multiplier, blurb] of tiers) {
-      if (rows.length >= 12) return;
-      rows.push([`${tier} ${item}`, item, Math.round(base * multiplier) - 0.01, `${blurb} From the ${storeName} ${item.toLowerCase()} range.`]);
-    }
-    if (index >= 5) return;
+    return tiers.map(
+      ([tier, multiplier, blurb]): ProductRow => [
+        `${tier} ${item}`,
+        item,
+        Math.round(base * multiplier) - 0.01,
+        `${blurb} From the ${storeName} ${item.toLowerCase()} range.`,
+      ],
+    );
   });
-  return rows;
+}
+
+function fromVertical(type: string, vertical: Vertical, storeName: string): ResolvedCatalog {
+  return {
+    type,
+    label: vertical.label,
+    tagline: vertical.tagline,
+    hero: vertical.hero,
+    products: toSeedProducts(vertical.products, storeName),
+  };
 }
 
 /**
@@ -482,15 +494,7 @@ export function resolveCatalog(spec: CatalogSpec, storeName: string, storeId: st
     };
   }
 
-  if (vertical && detected) {
-    return {
-      type: detected,
-      label: vertical.label,
-      tagline: vertical.tagline,
-      hero: vertical.hero,
-      products: toSeedProducts(vertical.products, storeName),
-    };
-  }
+  if (vertical && detected) return fromVertical(detected, vertical, storeName);
 
   const items = itemsFromSells(sells);
   if (items.length > 0) {
@@ -504,13 +508,7 @@ export function resolveCatalog(spec: CatalogSpec, storeName: string, storeId: st
     };
   }
 
-  return {
-    type: 'general',
-    label: GENERAL.label,
-    tagline: GENERAL.tagline,
-    hero: GENERAL.hero,
-    products: toSeedProducts(GENERAL.products, storeName),
-  };
+  return fromVertical('general', GENERAL, storeName);
 }
 
 export function listCatalogTypes(): Array<{ type: string; label: string; description: string }> {

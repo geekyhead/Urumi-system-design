@@ -1,12 +1,13 @@
 import { Activity, AlertTriangle, History, Loader2, LogOut, Plus, ServerCog, UserRound } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
-import { AUTH_REQUIRED_EVENT, ApiError, api, tokenStore } from './api';
+import { AUTH_REQUIRED_EVENT, ApiError, api, errorText, tokenStore } from './api';
 import { AuditLogView } from './components/AuditLogView';
 import { CreateStoreModal } from './components/CreateStoreModal';
 import { DomainsModal } from './components/DomainsModal';
 import { LoginScreen } from './components/LoginScreen';
 import { MetricsBar } from './components/MetricsBar';
 import { StoreList } from './components/StoreList';
+import { usePolling } from './hooks';
 import type { Me, MetricsSummary, PlatformInfo, Store } from './types';
 
 const POLL_INTERVAL_MS = 5000;
@@ -47,7 +48,7 @@ export default function App() {
       api.metricsSummary().then(setMetrics, () => undefined);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) return;
-      setLoadError(err instanceof ApiError ? err.message : 'Failed to load stores');
+      setLoadError(errorText(err, 'Failed to load stores'));
       setPlatform((prev) => (prev ? { ...prev, status: 'degraded' } : prev));
     } finally {
       setLoading(false);
@@ -55,12 +56,7 @@ export default function App() {
     }
   }, []);
 
-  useEffect(() => {
-    if (!me) return;
-    void refresh();
-    const interval = setInterval(() => void refresh(), POLL_INTERVAL_MS);
-    return () => clearInterval(interval);
-  }, [me, refresh]);
+  usePolling(refresh, POLL_INTERVAL_MS, Boolean(me));
 
   const closeCreate = useCallback(() => setCreateOpen(false), []);
   const closeAudit = useCallback(() => setAuditOpen(false), []);
@@ -84,7 +80,7 @@ export default function App() {
       setPendingDelete(null);
       void refresh();
     } catch (err) {
-      setDeleteError(err instanceof ApiError ? err.message : 'Failed to delete store');
+      setDeleteError(errorText(err, 'Failed to delete store'));
     } finally {
       setDeleting(false);
     }

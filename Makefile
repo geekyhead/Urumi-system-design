@@ -45,8 +45,7 @@ logs: ## Tail orchestrator API logs
 	kubectl logs -n store-platform deploy/store-platform-api -f
 
 tokens: ## Print dashboard/API sign-in tokens
-	@kubectl get secret -n store-platform store-platform-auth -o jsonpath='{.data.users\.json}' | base64 -d \
-		| jq -r '.[] | "\(.name)\t\(.role)\tmax \(.maxStores) stores\t\(.token)"'
+	@bash -c '. scripts/lib.sh && print_tokens'
 
 backup: ## Back up one store: make backup STORE=<id>
 	./scripts/store-backup.sh $(STORE)
