@@ -27,19 +27,34 @@ fi
 $WP option update blogname "${STORE_NAME}"
 $WP rewrite structure '/%postname%/' --hard
 
+# Upgrades: move core, WooCommerce and Storefront to the versions pinned in
+# the chart values, then run database migrations.
+if [ -n "${WORDPRESS_CORE_VERSION:-}" ] && [ "$($WP core version)" != "${WORDPRESS_CORE_VERSION}" ]; then
+  echo "[seeder] updating WordPress core to ${WORDPRESS_CORE_VERSION}"
+  $WP core update --version="${WORDPRESS_CORE_VERSION}" --force
+fi
+$WP core update-db
+
 if ! $WP plugin is-installed woocommerce; then
   echo "[seeder] installing WooCommerce ${WOOCOMMERCE_VERSION}"
   $WP plugin install woocommerce --version="${WOOCOMMERCE_VERSION}"
+elif [ "$($WP plugin get woocommerce --field=version)" != "${WOOCOMMERCE_VERSION}" ]; then
+  echo "[seeder] changing WooCommerce to ${WOOCOMMERCE_VERSION}"
+  $WP plugin install woocommerce --version="${WOOCOMMERCE_VERSION}" --force
 fi
 if ! $WP plugin is-active woocommerce; then
   $WP plugin activate woocommerce
 fi
+$WP wc update >/dev/null 2>&1 || echo "[seeder] warning: WooCommerce database update reported an error"
 
 # Storefront is WooCommerce's official theme: classic templates, header cart,
 # product search and a mobile footer bar that work with WooCommerce 8.9.
 if ! $WP theme is-installed storefront; then
   echo "[seeder] installing Storefront ${STOREFRONT_VERSION}"
   $WP theme install storefront --version="${STOREFRONT_VERSION}"
+elif [ "$($WP theme get storefront --field=version)" != "${STOREFRONT_VERSION}" ]; then
+  echo "[seeder] changing Storefront to ${STOREFRONT_VERSION}"
+  $WP theme install storefront --version="${STOREFRONT_VERSION}" --force
 fi
 if ! $WP theme is-active storefront; then
   $WP theme activate storefront

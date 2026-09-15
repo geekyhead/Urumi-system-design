@@ -63,7 +63,14 @@ export class WooCommerceEngineProvider implements EngineProvider {
     const release = this.releaseName(store);
     const pods = snapshot.pods.filter((p) => p.metadata?.labels?.['app.kubernetes.io/instance'] === release);
     const podHealth = pods.map(toPodHealth);
-    const seederJob = snapshot.jobs.find((j) => j.metadata?.name === `${release}-seeder`);
+    // Seeder Jobs are named per Helm revision; the newest one reflects the current release.
+    const seederJob = snapshot.jobs
+      .filter(
+        (j) =>
+          j.metadata?.labels?.['app.kubernetes.io/component'] === 'seeder' &&
+          j.metadata?.labels?.['app.kubernetes.io/instance'] === release,
+      )
+      .sort((a, b) => String(b.metadata?.creationTimestamp ?? '').localeCompare(String(a.metadata?.creationTimestamp ?? '')))[0];
     const seeder = jobState(seederJob);
     const health: StoreHealth = {
       helmRelease: snapshot.helmReleasePresent,

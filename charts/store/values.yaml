@@ -87,6 +87,12 @@ seeder:
   woocommerceVersion: "8.9.3"
   # WooCommerce's official theme; 4.6.2 supports WordPress 6.4.
   storefrontVersion: "4.6.2"
+  # Empty keeps the WordPress core shipped in the image. Set a version (e.g.
+  # "6.4.5") to update core files on the volume during `helm upgrade`.
+  wordpressCoreVersion: ""
+  # Products, pages and menus are seeded once. true re-applies the catalog on
+  # the next upgrade and overwrites merchant edits to seeded products.
+  reseedContent: false
   backoffLimit: 4
   activeDeadlineSeconds: 900
   ttlSecondsAfterFinished: 86400

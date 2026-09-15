@@ -15,10 +15,13 @@ data:
   {{- (.Files.Glob "files/*").AsConfig | nindent 2 }}
   catalog.json: {{ .Values.store.catalogData | toJson | quote }}
 ---
+# A Job's pod template is immutable, so the name carries the Helm revision:
+# every `helm upgrade` / `helm rollback` replaces the old Job with a new one
+# that re-runs the idempotent seeder (plugin/theme upgrades, DB migrations).
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ .Release.Name }}-seeder
+  name: {{ .Release.Name }}-seeder-r{{ .Release.Revision }}
   labels:
     {{- include "store.labels" . | nindent 4 }}
     app.kubernetes.io/component: seeder
@@ -80,6 +83,10 @@ spec:
               value: {{ .Values.seeder.woocommerceVersion | quote }}
             - name: STOREFRONT_VERSION
               value: {{ .Values.seeder.storefrontVersion | quote }}
+            - name: WORDPRESS_CORE_VERSION
+              value: {{ .Values.seeder.wordpressCoreVersion | quote }}
+            - name: STORE_RESEED
+              value: {{ .Values.seeder.reseedContent | quote }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

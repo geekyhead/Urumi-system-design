@@ -165,6 +165,13 @@ $catalog    = json_decode( (string) file_get_contents( '/scripts/catalog.json' )
 if ( ! is_array( $catalog ) || empty( $catalog['products'] ) ) {
 	WP_CLI::error( 'catalog.json is missing or has no products' );
 }
+// Content is seeded once. Upgrades re-run this Job, and must not overwrite
+// prices, stock or pages the merchant has edited since.
+$seeded_at = get_option( 'platform_content_seeded_at' );
+if ( $seeded_at && 'true' !== seed_env( 'STORE_RESEED', 'false' ) ) {
+	seed_log( "content already seeded at {$seeded_at}; skipping (set seeder.reseedContent=true to re-apply)" );
+	return;
+}
 seed_log( "seeding '{$store_name}' with the {$catalog['label']} catalog (" . count( $catalog['products'] ) . ' products)' );
 
 // ---------------------------------------------------------------------------
@@ -410,4 +417,5 @@ wp_update_custom_css_post( $css, 'storefront' );
 update_option( 'woocommerce_demo_store', 'yes' );
 update_option( 'woocommerce_demo_store_notice', "Demo store {$store_id}: orders are paid with Cash on Delivery." );
 
+update_option( 'platform_content_seeded_at', gmdate( 'c' ), false );
 seed_log( 'content seeded: ' . count( $catalog['products'] ) . ' products, home page, menu and branding' );
