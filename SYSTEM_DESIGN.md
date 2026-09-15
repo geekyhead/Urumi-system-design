@@ -190,6 +190,21 @@ If teardown fails, it is audited as `STORE_DELETE_FAILED` and the reconciler ret
 
 ## 5. Security
 
+### Exposure: public versus internal-only
+
+| Surface | Reachable from | How |
+|---------|----------------|-----|
+| Dashboard (`/`) | Public, through Ingress NGINX | `platform.<domain>`; static files only |
+| Orchestrator API (`/api/*`, `/healthz`) | Public, through Ingress NGINX | Same host as the dashboard; rate limited, schema validated, **no end-user authentication** (put SSO or an IP allow-list in front in production, see README) |
+| Storefront and `/wp-admin` | Public, through Ingress NGINX | `store-<id>.<domain>`; WordPress login protects admin |
+| `/metrics`, `/readyz` | Cluster-internal only | Not routed by the Ingress; `/metrics` through Ingress returns the dashboard HTML |
+| MariaDB (3306) | Its own store namespace only | ClusterIP Service + NetworkPolicy; verified that a pod in another namespace cannot connect |
+| WordPress pod (80) | Ingress controller and its own namespace only | NetworkPolicy allows only `ingress-nginx` and same-namespace pods |
+| Kubernetes API | Orchestrator ServiceAccount only | RBAC + ValidatingAdmissionPolicy below; no other store pod mounts a token |
+| Store credentials | Kubernetes Secrets in the store namespace | Never returned by the API or written to logs or the audit trail |
+
+No Service uses `NodePort` or `LoadBalancer` inside store namespaces (the ResourceQuota sets both to 0).
+
 ### RBAC least privilege
 
 Kubernetes RBAC cannot express "namespaces whose name starts with `store-`". The platform combines three mechanisms to get that property:
@@ -273,3 +288,21 @@ The only inputs that change between environments are `STORE_VALUES_PROFILE`, `ST
 ## 8. MedusaJS engine
 
 `MedusaEngineProvider` implements the same `EngineProvider` contract and is registered with `available = false`. The API rejects Medusa creates with `501 ENGINE_NOT_AVAILABLE` before touching the cluster, and the dashboard shows it as "Stubbed Demo". A real implementation adds a `charts/store-medusa` chart (Medusa backend and worker, Postgres StatefulSet, Redis, Next.js storefront, a migration and seed Job) installed into the same `store-<id>` namespace, so it inherits quota, LimitRange, NetworkPolicy, RBAC, idempotency, reconciliation and teardown without platform changes. Its readiness rule would be backend Ready + storefront Ready + seed Job Complete.
+
+## 9. Tradeoffs
+
+| Decision | Chosen | Alternative | Why, and what it costs |
+|----------|--------|-------------|------------------------|
+| Provisioning mechanism | API runs `helm upgrade --install` per store | A Kubernetes operator with a `Store` CRD | Helm is mandatory for the task, gives upgrade and rollback history per store for free, and is fast to build. Cost: spawning a helm process per store and a polling reconciler instead of watch-driven reconciliation. At hundreds of stores an operator is the better fit. |
+| State storage | Namespace labels and annotations | A platform database | The API is stateless and recovers from crashes by reading the cluster. Cost: annotation size limits and no rich queries; listing stores is a namespace list call. |
+| Isolation unit | Namespace per store | Shared namespace, or a vCluster/node pool per store | Namespaces give quotas, NetworkPolicies, RBAC and one-call teardown. Cost: stores share the node kernel and the cluster control plane, so this is soft multi-tenancy. |
+| Database | One MariaDB StatefulSet per store | A shared managed MySQL with a schema per store | Full data isolation and clean deletion. Cost: about 150m CPU and 192Mi memory per store even when idle. |
+| Store bootstrap | WP-CLI seeder Job on a shared RWO volume | A pre-baked WordPress image with WooCommerce and content | Stays on official images and pins versions through values. Cost: every new store downloads WooCommerce and Storefront (network dependency, about 20 s) and the RWO volume ties the seeder to the WordPress node. |
+| Readiness | Reconciler polls every 5 s | Kubernetes watches / informers | Simple and restart-safe. Cost: status can lag by up to one interval and each pass lists namespaces. |
+| Audit log | SQLite on a PVC | Postgres | Zero extra infrastructure locally. Cost: the API runs as a single replica; horizontal scaling needs Postgres (section 6). |
+| Global store limit | In-process mutex around count and create | Distributed lock or DB constraint | Correct for one replica. Cost: two replicas could briefly exceed the limit by one. |
+| Idempotency key | Store id derived from `sha256(key)` | Stored key-to-id table | Kubernetes name uniqueness makes duplicates impossible even across replicas. Cost: an 8-character id space per key, which is ample for this scale. |
+| Local domain | `*.127.0.0.1.nip.io` plus `*.localhost` alias | `/etc/hosts` entries or a local DNS server | No machine changes. Cost: depends on public DNS for nip.io, which some networks and embedded browsers block, hence the alias. |
+| Catalog content | Built-in store types, keyword detection and custom product lists, with generated images | Real product imports or AI-generated catalogs | Deterministic, offline and fast. Cost: product images are generated placeholders, and detection only knows 19 store types. |
+| Upgrades | Revision-named seeder Job, content seeded once, sequential canary script with auto-rollback | Blue/green store copies | Keeps merchant data in place and limits a bad release to one store. Cost: `helm rollback` does not undo database migrations; the script restores the backup for that. |
+| Engine scope | WooCommerce complete, MedusaJS behind the same interface | Both engines partially | One engine passes the end-to-end order test fully, and the interface shows where the second plugs in. |
