@@ -107,12 +107,14 @@ app.kubernetes.io/instance: {{ .root.Release.Name }}
     if (isset($_SERVER['HTTP_X_FORWARDED_HOST'])) {
       $_SERVER['HTTP_HOST'] = $_SERVER['HTTP_X_FORWARDED_HOST'];
     }
-    // Serve links and assets on whichever allowed host the visitor used
-    // (nip.io or an alias such as localhost); anything else gets the primary host.
-    $store_hosts = json_decode('{{ include "store.hosts" . }}', true);
-    $store_host = strtolower(isset($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : '');
-    if (!in_array($store_host, $store_hosts, true)) {
-      $store_host = $store_hosts[0];
+    // Serve links and assets on whichever hostname the visitor used: the
+    // platform subdomain, the *.localhost alias or a custom domain. Only
+    // hostnames the store Ingress routes can reach WordPress, so attaching a
+    // domain updates the Ingress alone and never restarts this pod.
+    $store_host = isset($_SERVER['HTTP_HOST']) ? explode(':', $_SERVER['HTTP_HOST'])[0] : '';
+    $store_host = strtolower(preg_replace('/[^A-Za-z0-9.\-]/', '', $store_host));
+    if ($store_host === '') {
+      $store_host = '{{ include "store.host" . }}';
     }
     define('WP_HOME', '{{ include "store.scheme" . }}://' . $store_host);
     define('WP_SITEURL', '{{ include "store.scheme" . }}://' . $store_host);
